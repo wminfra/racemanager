@@ -1,19 +1,20 @@
+import time
 from datetime import datetime, timezone
-from decimal import Decimal
-from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import admin_user, current_user
 from app.core.config import settings
 from app.database.session import get_db
-from app.models import Game, PriceOption, RacingSession, Simulator, User
+from app.models import AppSetting, AuditLog, Game, RacingSession, Simulator, User
 from app.schemas.auth import LoginRequest, UserCreate
-from app.schemas.session import SessionCreate
+from app.schemas.session import SessionCreate, SessionDurationsUpdate
 from app.services.audit import record
 from app.services.auth import hash_password, verify_password
+from app.services.sessions import (begin_session, cancel_waiting_session, configured_durations,
+                                   end_running_session, session_view)
 
 router = APIRouter()
 _login_attempts: dict[str, list[float]] = {}
@@ -21,7 +22,6 @@ _login_attempts: dict[str, list[float]] = {}
 
 @router.post("/auth/login")
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    import time
     host = request.client.host if request.client else "unknown"
     now = time.monotonic()
     attempts = [t for t in _login_attempts.get(host, []) if now - t < settings.login_window_seconds]
@@ -50,57 +50,109 @@ def me(user: User = Depends(current_user)):
     return {"id": user.id, "username": user.username, "role": user.role}
 
 
+def _active_session(db: Session, simulator_id: int = 1):
+    return db.scalar(select(RacingSession).where(
+        RacingSession.simulator_id == simulator_id,
+        RacingSession.status.in_(["waiting", "running"])))
+
+
+def _simulator_status(db: Session, simulator_id: int, steam) -> dict:
+    simulator = db.get(Simulator, simulator_id)
+    active = _active_session(db, simulator_id)
+    readiness = steam.inspect()
+    game_running = bool(steam.find_game_processes())
+    if active and active.status == "running":
+        state = "game_running"
+    elif active:
+        state = "starting"
+    elif game_running:
+        state = "unmanaged_game_running"
+    elif readiness["ready"]:
+        state = "ready"
+    else:
+        state = "not_connected"
+    safe_readiness = {key: readiness[key] for key in
+                      ("steam_installed", "game_installed", "steam_running", "account_selected",
+                       "authentication", "ready", "app_id", "reason")}
+    return {"simulator": simulator.name if simulator else f"Simulador {simulator_id}",
+            "simulator_id": simulator_id, "simulator_status": state,
+            "available": active is None and readiness["ready"] and not game_running,
+            "game_process_detected": game_running,
+            "session": session_view(active) if active else None,
+            "steam": safe_readiness}
+
+
 @router.get("/operator/status")
-def operator_status(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    simulator = db.scalar(select(Simulator).order_by(Simulator.id))
-    running = db.scalar(select(RacingSession).where(RacingSession.status == "running"))
-    return {"simulator": simulator.name if simulator else "Simulador 1",
-            "simulator_status": simulator.status if simulator else "not_connected",
-            "available": running is None, "running_session": _session_view(running) if running else None,
-            "today_count": len(db.scalars(select(RacingSession).where(
-                RacingSession.started_at >= datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0))).all()),
-            "operator": user.username}
+def operator_status(request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    status = _simulator_status(db, 1, request.app.state.steam)
+    local_midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    status["today_count"] = db.scalar(select(func.count(RacingSession.id)).where(
+        RacingSession.created_at >= local_midnight)) or 0
+    status["operator"] = user.username
+    status["recent_failure"] = db.scalar(select(RacingSession).where(
+        RacingSession.status == "technical_failure").order_by(RacingSession.ended_at.desc()))
+    status["recent_failure"] = session_view(status["recent_failure"]) if status["recent_failure"] else None
+    return status
 
 
-@router.get("/pricing")
-def pricing(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    return [{"id": p.id, "name": p.name, "duration_minutes": p.duration_minutes, "price": float(p.price)}
-            for p in db.scalars(select(PriceOption).where(PriceOption.is_active.is_(True)).order_by(PriceOption.duration_minutes))]
+@router.get("/sessions/durations")
+def session_durations(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return {"durations": configured_durations(db)}
+
+
+@router.get("/operator/sessions")
+def operator_history(db: Session = Depends(get_db), user: User = Depends(current_user),
+                     limit: int = Query(default=25, ge=1, le=100)):
+    sessions = db.scalars(select(RacingSession).order_by(RacingSession.created_at.desc()).limit(limit)).all()
+    return [session_view(item) for item in sessions]
+
+
+@router.get("/kiosk/status")
+def kiosk_status(request: Request, db: Session = Depends(get_db)):
+    simulator = db.get(Simulator, 1)
+    session = _active_session(db, 1)
+    value = session_view(session) if session else None
+    game_running = bool(request.app.state.steam.find_game_processes())
+    state = "game_running" if value and value["status"] == "running" else "starting" if value else "unmanaged_game_running" if game_running else "waiting"
+    return {"simulator_status": state,
+            "session": {"id": value["id"], "status": value["status"],
+                        "remaining_seconds": value["remaining_seconds"], "warning": value["warning"]} if value else None,
+            "simulator": simulator.name if simulator else "Simulador"}
 
 
 @router.post("/sessions", status_code=201)
-def start_session(payload: SessionCreate, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    if db.scalar(select(RacingSession).where(RacingSession.status == "running")):
-        raise HTTPException(409, "Já existe uma sessão em andamento")
-    simulator = db.get(Simulator, payload.simulator_id)
-    price = db.get(PriceOption, payload.price_option_id)
-    if not simulator or not price or not price.is_active:
-        raise HTTPException(422, "Simulador ou preço indisponível")
-    gross = Decimal(price.price)
-    venue = (gross * Decimal(price.venue_share_percent) / Decimal(100)).quantize(Decimal("0.01"))
-    session = RacingSession(public_id=str(uuid4()), simulator_id=simulator.id, price_option_id=price.id,
-        operator_id=user.id, status="running", started_at=datetime.now(timezone.utc),
-        contracted_minutes=price.duration_minutes, gross_amount=gross, venue_amount=venue, owner_amount=gross-venue)
-    db.add(session)
-    db.commit()
-    db.refresh(session)
-    return _session_view(session)
+def start_session(payload: SessionCreate, request: Request,
+                  db: Session = Depends(get_db), user: User = Depends(current_user)):
+    try:
+        session = begin_session(db, user, payload.simulator_id, payload.game_id,
+                                payload.duration_minutes, request.app.state.steam)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return session_view(session)
 
 
-@router.post("/sessions/{public_id}/finish")
-def finish_session(public_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    session = db.scalar(select(RacingSession).where(RacingSession.public_id == public_id, RacingSession.status == "running"))
-    if not session:
-        raise HTTPException(404, "Sessão em andamento não encontrada")
-    ended = datetime.now(timezone.utc)
-    session.ended_at = ended
-    started = session.started_at
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
-    session.effective_seconds = max(0, int((ended - started).total_seconds()))
-    session.status = "completed"
-    db.commit()
-    return _session_view(session)
+@router.post("/sessions/{public_id}/cancel")
+def cancel_session(public_id: str, request: Request,
+                   db: Session = Depends(get_db), user: User = Depends(current_user)):
+    try:
+        return session_view(cancel_waiting_session(db, public_id, user, request.app.state.steam))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/sessions/{public_id}/end")
+def finish_session(public_id: str, request: Request,
+                   db: Session = Depends(get_db), user: User = Depends(current_user)):
+    try:
+        return session_view(end_running_session(db, public_id, user, request.app.state.steam))
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.post("/admin/users", status_code=201)
@@ -119,25 +171,35 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db), admin: User 
 @router.get("/admin/summary")
 def admin_summary(db: Session = Depends(get_db), admin: User = Depends(admin_user)):
     sessions = db.scalars(select(RacingSession)).all()
-    gross = sum((s.gross_amount for s in sessions if s.status == "completed"), Decimal(0))
-    return {"sessions_total": len(sessions), "sessions_completed": sum(s.status == "completed" for s in sessions),
-            "gross_revenue": float(gross), "users": db.query(User).count(),
-            "active_session": next((_session_view(s) for s in sessions if s.status == "running"), None)}
+    counts = {key: sum(session.status == key for session in sessions)
+              for key in ("waiting", "running", "completed", "cancelled", "interrupted", "technical_failure")}
+    return {"sessions_total": len(sessions), "by_status": counts,
+            "operators": db.scalar(select(func.count(User.id)).where(User.role == "operator")) or 0,
+            "active_session": next((session_view(s) for s in sessions if s.status in {"waiting", "running"}), None)}
+
+
+@router.get("/admin/session-durations")
+def read_session_durations(db: Session = Depends(get_db), admin: User = Depends(admin_user)):
+    return {"durations": configured_durations(db)}
+
+
+@router.put("/admin/session-durations")
+def update_session_durations(payload: SessionDurationsUpdate,
+                             db: Session = Depends(get_db), admin: User = Depends(admin_user)):
+    values = sorted(set(payload.durations))
+    if not values or any(value < 5 or value > 240 for value in values):
+        raise HTTPException(422, "Informe durações únicas entre 5 e 240 minutos.")
+    setting = db.get(AppSetting, "session_durations_minutes")
+    if setting is None:
+        setting = AppSetting(key="session_durations_minutes", value="")
+        db.add(setting)
+    setting.value = ",".join(map(str, values))
+    record(db, admin.id, "settings.session_durations", setting.value)
+    db.commit()
+    return {"durations": values}
 
 
 @router.get("/admin/audit")
 def audit_log(db: Session = Depends(get_db), admin: User = Depends(admin_user)):
-    from app.models import AuditLog
-    return [{"action": a.action, "details": a.details, "created_at": a.created_at.isoformat()}
-            for a in db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(100))]
-
-
-def _session_view(session: RacingSession):
-    started = session.started_at
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=timezone.utc)
-    remaining = max(0, session.contracted_minutes * 60 - int((datetime.now(timezone.utc) - started).total_seconds())) if session.status == "running" else None
-    return {"id": session.public_id, "status": session.status, "started_at": started.isoformat(), "remaining_seconds": remaining,
-            "ended_at": session.ended_at.isoformat() if session.ended_at else None,
-            "contracted_minutes": session.contracted_minutes, "effective_seconds": session.effective_seconds,
-            "gross_amount": float(session.gross_amount)}
+    return [{"action": item.action, "details": item.details, "created_at": item.created_at.isoformat()}
+            for item in db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(100))]

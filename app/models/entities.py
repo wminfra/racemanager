@@ -1,7 +1,6 @@
 from datetime import datetime
-from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.session import Base
@@ -41,32 +40,28 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class PriceOption(Base):
-    __tablename__ = "price_options"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(80))
-    duration_minutes: Mapped[int] = mapped_column(Integer)
-    price: Mapped[Decimal] = mapped_column(Numeric(10, 2))
-    venue_share_percent: Mapped[Decimal] = mapped_column(Numeric(5, 2), default=Decimal("50.00"))
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
 class RacingSession(Base):
-    __tablename__ = "racing_sessions"
+    __tablename__ = "sessions"
+    __table_args__ = (
+        CheckConstraint("status IN ('waiting', 'running', 'completed', 'cancelled', 'interrupted', 'technical_failure')", name="ck_sessions_status"),
+        Index("uq_one_running_session_per_simulator", "simulator_id", unique=True,
+              sqlite_where=text("status IN ('waiting', 'running')"),
+              postgresql_where=text("status IN ('waiting', 'running')")),
+    )
     id: Mapped[int] = mapped_column(primary_key=True)
     public_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
     simulator_id: Mapped[int] = mapped_column(ForeignKey("simulators.id"))
-    game_id: Mapped[int | None] = mapped_column(ForeignKey("games.id"), nullable=True)
-    price_option_id: Mapped[int] = mapped_column(ForeignKey("price_options.id"))
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id"))
     operator_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
-    status: Mapped[str] = mapped_column(String(20), default="running", index=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="waiting", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     contracted_minutes: Mapped[int] = mapped_column(Integer)
     effective_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    gross_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2))
-    venue_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2))
-    owner_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2))
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    warning_2m_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    warning_30s_sent: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class AuditLog(Base):

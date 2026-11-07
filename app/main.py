@@ -11,29 +11,34 @@ from app.api.routes import router
 from app.api.realtime import router as realtime_router
 from app.core.config import settings
 from app.database.session import Base, SessionLocal, engine
-from app.models import Game, PriceOption, Simulator
-from app.services.session_timer import expire_sessions
+from app.models import AppSetting, Game, Simulator
+from app.database.migrations import migrate_legacy_sessions, recover_open_sessions
+from app.modules.steam.integration import SteamIntegration
+from app.services.session_supervisor import SessionSupervisor
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    with SessionLocal() as db:
+    Base.metadata.create_all(bind=app.state.engine)
+    with app.state.session_factory() as db:
         if not db.query(Simulator).first():
             db.add(Simulator(name="Simulador 1", status="not_connected", location="Estabelecimento"))
         if not db.query(Game).first():
             db.add(Game(name="Assetto Corsa", platform="Steam", is_enabled=True))
-        if not db.query(PriceOption).first():
-            db.add_all([PriceOption(name="15 minutos", duration_minutes=15, price=25, venue_share_percent=50),
-                        PriceOption(name="30 minutos", duration_minutes=30, price=45, venue_share_percent=50)])
         db.commit()
-    timer_task = asyncio.create_task(expire_sessions())
+        if not db.get(AppSetting, "session_durations_minutes"):
+            db.add(AppSetting(key="session_durations_minutes", value="15,30,60"))
+            db.commit()
+        migrate_legacy_sessions(db)
+        recover_open_sessions(db, app.state.steam)
+    supervisor = SessionSupervisor(app.state.session_factory, app.state.steam)
+    app.state.supervisor_task = asyncio.create_task(supervisor.run())
     yield
-    timer_task.cancel()
+    app.state.supervisor_task.cancel()
     try:
-        await timer_task
+        await app.state.supervisor_task
     except asyncio.CancelledError:
         pass
 
@@ -42,6 +47,9 @@ if not settings.secret_key:
     raise RuntimeError("Configure RACING_SECRET_KEY no arquivo .env antes de iniciar.")
 
 app = FastAPI(title="Racing Manager", version="0.1.0", lifespan=lifespan)
+app.state.engine = engine
+app.state.session_factory = SessionLocal
+app.state.steam = SteamIntegration(settings)
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie=settings.session_cookie,
                    https_only=settings.cookie_secure, same_site="lax", max_age=8 * 60 * 60)
 app.include_router(router, prefix="/api")

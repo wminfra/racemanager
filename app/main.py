@@ -14,6 +14,7 @@ from app.database.session import Base, SessionLocal, engine
 from app.models import AppSetting, Game, Simulator
 from app.database.migrations import migrate_legacy_sessions, recover_open_sessions
 from app.modules.steam.integration import SteamIntegration
+from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
 from app.services.session_supervisor import SessionSupervisor
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +27,7 @@ async def lifespan(app: FastAPI):
         if not db.query(Simulator).first():
             db.add(Simulator(name="Simulador 1", status="not_connected", location="Estabelecimento"))
         if not db.query(Game).first():
-            db.add(Game(name="Assetto Corsa", platform="Steam", is_enabled=True))
+            db.add(Game(name=ASSETTO_CORSA_COMPETIZIONE.name, platform="Steam", is_enabled=True))
         db.commit()
         if not db.get(AppSetting, "session_durations_minutes"):
             db.add(AppSetting(key="session_durations_minutes", value="15,30,60"))
@@ -51,7 +52,7 @@ app.state.engine = engine
 app.state.session_factory = SessionLocal
 app.state.steam = SteamIntegration(settings)
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie=settings.session_cookie,
-                   https_only=settings.cookie_secure, same_site="lax", max_age=8 * 60 * 60)
+                   https_only=settings.cookie_secure, same_site="lax", path="/", max_age=8 * 60 * 60)
 app.include_router(router, prefix="/api")
 app.include_router(realtime_router, prefix="/api")
 app.mount("/assets", StaticFiles(directory=ROOT / "frontend" / "assets"), name="assets")

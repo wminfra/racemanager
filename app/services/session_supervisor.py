@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app.models import AuditLog, RacingSession, Simulator
+from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ class SessionSupervisor:
                         db.add(AuditLog(actor_id=session.operator_id, action="session.game_started",
                             details=f"session={session.public_id}"))
                     elif (now - created).total_seconds() >= self.launch_timeout_seconds:
-                        self._fail(db, session, now, "Assetto Corsa não iniciou dentro do tempo limite.", "session.launch_timeout")
+                        self._fail(db, session, now, f"{ASSETTO_CORSA_COMPETIZIONE.name} não iniciou dentro do tempo limite.", "session.launch_timeout")
                     continue
 
                 started = session.started_at or now
@@ -79,7 +80,7 @@ class SessionSupervisor:
                     db.add(AuditLog(actor_id=session.operator_id, action="session.warning_30s",
                         details=f"session={session.public_id}"))
                 if not processes:
-                    self._fail(db, session, now, "Assetto Corsa encerrou antes do fim da sessão.", "session.game_exited_unexpectedly", interrupted=True)
+                    self._fail(db, session, now, f"{ASSETTO_CORSA_COMPETIZIONE.name} encerrou antes do fim da sessão.", "session.game_exited_unexpectedly", interrupted=True)
                 elif self.steam.is_game_unresponsive(processes):
                     if simulator:
                         simulator.status = "game_unresponsive"
@@ -101,5 +102,6 @@ class SessionSupervisor:
         session.ended_at = now
         session.effective_seconds = max(0, int((now - started).total_seconds())) if started else 0
         session.failure_reason = reason[:1000]
+        logger.error("Session %s failed (%s): %s", session.public_id, action, reason)
         db.add(AuditLog(actor_id=session.operator_id, action=action,
             details=f"session={session.public_id} {reason}"[:2000]))

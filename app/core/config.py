@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     login_max_attempts: int = 5
     login_window_seconds: int = 300
     steam_path: str = ""
+    steam_library_path: str = ""
     assetto_corsa_path: str = ""
+    short_session_test_mode: bool = False
 
 
 settings = Settings()

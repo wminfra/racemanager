@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -6,19 +7,27 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import AppSetting, AuditLog, Game, RacingSession, Simulator, User
+from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
+from app.core.config import settings
 
 DEFAULT_DURATIONS = [15, 30, 60]
+logger = logging.getLogger(__name__)
 
 
-def configured_durations(db: Session) -> list[int]:
+def configured_durations(db: Session, include_test_durations: bool = False) -> list[int]:
     setting = db.get(AppSetting, "session_durations_minutes")
     if not setting:
-        return DEFAULT_DURATIONS.copy()
+        values = DEFAULT_DURATIONS.copy()
+        return sorted(set(values + ([1, 2] if include_test_durations and settings.short_session_test_mode else [])))
     try:
         values = [int(value.strip()) for value in setting.value.split(",") if value.strip()]
     except ValueError:
-        return DEFAULT_DURATIONS.copy()
-    return sorted(set(value for value in values if 5 <= value <= 240)) or DEFAULT_DURATIONS.copy()
+        values = DEFAULT_DURATIONS.copy()
+    else:
+        values = sorted(set(value for value in values if 5 <= value <= 240)) or DEFAULT_DURATIONS.copy()
+    if include_test_durations and settings.short_session_test_mode:
+        values.extend([1, 2])
+    return sorted(set(values))
 
 
 def session_view(session: RacingSession) -> dict:
@@ -59,7 +68,7 @@ def _audit(db: Session, actor_id: int | None, action: str, session: RacingSessio
 
 def begin_session(db: Session, user: User, simulator_id: int, game_id: int,
                   duration_minutes: int, steam) -> RacingSession:
-    if duration_minutes not in configured_durations(db):
+    if duration_minutes not in configured_durations(db, include_test_durations=True):
         raise ValueError("Duração de sessão indisponível.")
     if db.scalar(select(RacingSession.id).where(
             RacingSession.simulator_id == simulator_id,
@@ -67,13 +76,13 @@ def begin_session(db: Session, user: User, simulator_id: int, game_id: int,
         raise RuntimeError("O simulador já possui uma sessão ativa.")
     simulator = db.get(Simulator, simulator_id)
     game = db.get(Game, game_id)
-    if not simulator or not game or not game.is_enabled or game.name != "Assetto Corsa":
+    if not simulator or not game or not game.is_enabled or game.name != ASSETTO_CORSA_COMPETIZIONE.name:
         raise ValueError("Simulador ou jogo indisponível.")
     readiness = steam.inspect()
     if not readiness["ready"]:
         raise RuntimeError(readiness["reason"])
     if steam.find_game_processes():
-        raise RuntimeError("Assetto Corsa já está em execução; não é possível iniciar outra sessão.")
+        raise RuntimeError(f"{ASSETTO_CORSA_COMPETIZIONE.name} já está em execução; não é possível iniciar outra sessão.")
     session = RacingSession(public_id=str(uuid4()), simulator_id=simulator_id,
         game_id=game_id, operator_id=user.id, status="waiting",
         created_at=datetime.now(timezone.utc), contracted_minutes=duration_minutes)
@@ -91,6 +100,7 @@ def begin_session(db: Session, user: User, simulator_id: int, game_id: int,
         session.ended_at = datetime.now(timezone.utc)
         session.failure_reason = str(exc)[:1000]
         _audit(db, user.id, "session.launch_failed", session, session.failure_reason)
+        logger.exception("Could not launch %s for session %s", ASSETTO_CORSA_COMPETIZIONE.name, session.public_id)
         db.commit()
         raise RuntimeError(session.failure_reason) from exc
     return session

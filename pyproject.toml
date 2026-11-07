@@ -26,4 +26,5 @@ include = ["app*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["real_integration: requires the installed Steam client and Assetto Corsa Competizione"]
 

@@ -10,6 +10,7 @@ os.environ.setdefault("RACING_SECRET_KEY", "test-only-secret-key-that-is-long-en
 
 from app.database.session import Base
 from app.main import app
+from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
 
 
 class FakeSteam:
@@ -26,7 +27,7 @@ class FakeSteam:
         return {"ready": self.ready, "steam_installed": self.ready, "game_installed": self.ready,
                 "steam_running": self.ready, "account_selected": self.ready,
                 "authentication": "test_ready" if self.ready else "not_ready",
-                "app_id": 244210, "game_path": "simulated", "reason": "Simulação pronta" if self.ready else "Steam indisponível"}
+                "app_id": ASSETTO_CORSA_COMPETIZIONE.app_id, "game_path": "simulated", "reason": "Simulação pronta" if self.ready else "Steam indisponível"}
 
     def find_game_processes(self):
         return [object()] if self.running else []

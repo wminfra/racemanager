@@ -73,7 +73,7 @@ def _simulator_status(db: Session, simulator_id: int, steam) -> dict:
         state = "not_connected"
     safe_readiness = {key: readiness[key] for key in
                       ("steam_installed", "game_installed", "steam_running", "account_selected",
-                       "authentication", "ready", "app_id", "reason")}
+                       "ready", "app_id", "reason")}
     return {"simulator": simulator.name if simulator else f"Simulador {simulator_id}",
             "simulator_id": simulator_id, "simulator_status": state,
             "available": active is None and readiness["ready"] and not game_running,
@@ -97,7 +97,7 @@ def operator_status(request: Request, db: Session = Depends(get_db), user: User 
 
 @router.get("/sessions/durations")
 def session_durations(db: Session = Depends(get_db), user: User = Depends(current_user)):
-    return {"durations": configured_durations(db)}
+    return {"durations": configured_durations(db, include_test_durations=True)}
 
 
 @router.get("/operator/sessions")

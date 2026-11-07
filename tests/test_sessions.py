@@ -3,7 +3,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 
 from app.database.migrations import migrate_legacy_sessions, recover_open_sessions
+from app.core.config import settings
 from app.models import Game, RacingSession, Simulator, User
+from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
 from app.services.auth import hash_password
 from app.services.session_supervisor import SessionSupervisor
 
@@ -40,6 +42,17 @@ def test_session_cannot_start_when_steam_is_not_ready(client, db_session):
     response = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1})
     assert response.status_code == 409
     assert client.steam.launch_calls == 0
+
+
+def test_one_and_two_minute_test_options_are_temporary_and_not_admin_packages(client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "short_session_test_mode", True)
+    db_session.add(User(username="administrator", password_hash=hash_password("long-enough-password"), role="admin"))
+    db_session.commit()
+    assert client.post("/api/auth/login", json={"username":"administrator", "password":"long-enough-password"}).status_code == 200
+    assert client.get("/api/sessions/durations").json()["durations"] == [1, 2, 15, 30, 60]
+    assert client.get("/api/admin/session-durations").json()["durations"] == [15, 30, 60]
+    assert client.put("/api/admin/session-durations", json={"durations":[1, 2]}).status_code == 422
+    assert client.get("/api/admin/session-durations").json()["durations"] == [15, 30, 60]
 
 
 def test_launch_failure_is_recorded(client, db_session):
@@ -138,7 +151,7 @@ def test_restart_marks_open_session_interrupted_and_does_not_resume(client, db_s
     second_simulator = Simulator(name="Test Rig 2")
     db_session.add(second_simulator)
     db_session.flush()
-    game = db_session.scalar(select(Game).where(Game.name == "Assetto Corsa"))
+    game = db_session.scalar(select(Game).where(Game.name == ASSETTO_CORSA_COMPETIZIONE.name))
     db_session.add_all([
         RacingSession(public_id="recover-running", simulator_id=1, game_id=game.id, operator_id=1,
             status="running", started_at=datetime.now(timezone.utc)-timedelta(seconds=50), contracted_minutes=15),

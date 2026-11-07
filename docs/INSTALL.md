@@ -1,13 +1,13 @@
-# Racing Manager — operação local
+# Racing Manager — operação e integração ACC
 
 ## Requisitos
 
-- Windows 10/11 x64 e Python 3.12.
-- Microsoft Edge.
-- Steam instalada, conta dedicada autenticada manualmente e Assetto Corsa AppID 244210 instalado.
-- Rede local privada para o tablet do operador. O sistema não deve ser publicado na internet.
+- Windows 10/11 x64, Python 3.12 e Microsoft Edge.
+- Cliente Steam instalado e iniciado/autenticado manualmente pelo proprietário.
+- Assetto Corsa Competizione instalado pela Steam (AppID 805550).
+- Rede local privada para o celular/tablet do operador. Não exponha a porta 8000 à internet.
 
-## Instalar
+## Instalar e preparar
 
 No PowerShell, na pasta do projeto:
 
@@ -19,87 +19,79 @@ pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
 
-No `.env`, configure `RACING_SECRET_KEY` com uma chave nova. Gere-a com:
+Defina no `.env` uma chave `RACING_SECRET_KEY` nova, gerada por:
 
 ```powershell
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Não compartilhe nem versione `.env`. Se a chave já tiver sido copiada para algum exemplo ou repositório, gere outra. `RACING_STEAM_PATH` e `RACING_ASSETTO_CORSA_PATH` são opcionais quando a detecção automática da Steam funciona.
+Não compartilhe nem versione `.env`. Crie um administrador com `python -m scripts.create_admin` e use esse painel para criar o operador.
 
-Crie o administrador uma vez:
+## Steam e detecção do ACC
 
-```powershell
-python -m scripts.create_admin
-```
+1. Inicie a Steam manualmente e autentique a conta desejada. O Racing Manager não solicita senha nem Steam Guard.
+2. Instale o Assetto Corsa Competizione pela Steam e aguarde a instalação terminar.
+3. A detecção lê o manifesto `appmanifest_805550.acf`, as bibliotecas em `libraryfolders.vdf` e procura `AC2-Win64-Shipping.exe` dentro da pasta registrada pelo manifesto. Não há caminho fixo de jogo.
+4. Se a biblioteca não for descoberta automaticamente, configure em `.env` `RACING_STEAM_LIBRARY_PATH` com a raiz da biblioteca, isto é, a pasta que contém `steamapps`. `RACING_STEAM_PATH` pode apontar para `steam.exe` ou para a pasta do cliente. `RACING_ASSETTO_CORSA_PATH`, opcionalmente, pode apontar para a pasta de instalação do ACC.
+5. O diagnóstico verifica Steam instalada/em execução, conta Steam selecionada, manifesto, executável e acesso de leitura. O lançamento usa o protocolo oficial `steam://rungameid/805550`; não inicia Steam nem automatiza login.
 
-Não há usuário ou senha padrão.
+A seleção local da conta é inferida do `loginusers.vdf`; isso não revela nem lê senha e não prova que a Steam aceitará o entitlement. A Steam valida autenticação e licença quando o jogo abre.
 
-## Iniciar os serviços e interfaces
+## Iniciar e acessar
 
-Em uma janela PowerShell:
+Inicie Steam primeiro, depois execute em PowerShell:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\Start-RacingManager.ps1
 ```
 
-O script principal chama separadamente o backend e o Edge. Eles iniciam o backend oculto na rede local e abrem o Edge no endereço `/kiosk` em modo `--kiosk` de tela cheia, usando um perfil isolado em `.runtime/edge-profile`. O Kiosk fica atrás do Assetto Corsa e reaparece quando o jogo fecha. Os scripts não criam tarefas de inicialização, não alteram Explorer, Registro, políticas de grupo, contas ou configurações do Windows.
+O servidor inicia oculto na porta 8000 e o Edge abre `/kiosk` em tela cheia. Os scripts separados são `Start-Backend.ps1`, `Start-Kiosk.ps1` e `Stop-TestEnvironment.ps1`. Eles não alteram Registro, Explorer, políticas, contas ou inicialização do Windows.
 
-Interfaces:
-
-- Kiosk no monitor do simulador: `http://localhost:8000/kiosk`.
+- Kiosk: `http://localhost:8000/kiosk`.
+- Operator no computador: `http://localhost:8000/operator`.
+- Operator no celular/tablet: `http://<IP-local-do-computador>:8000/operator`.
 - Admin: `http://localhost:8000/admin`.
-- Operador no mesmo computador: `http://localhost:8000/operator`.
-- Operador no tablet/celular: `http://<IP-local-do-computador>:8000/operator`.
-- Documentação da API: `http://localhost:8000/docs`.
+- OpenAPI: `http://localhost:8000/docs`.
 
-Para descobrir o IP local, execute `ipconfig`. O backend escuta na porta 8000 em todas as interfaces. Permita essa porta somente na rede privada pelo Firewall do Windows; não configure redirecionamento de porta no roteador. Para executar manualmente sem o script, use `uvicorn app.main:app --host 0.0.0.0 --port 8000`.
+Para descobrir o IP, execute `ipconfig`. Permita a porta 8000 somente na rede privada pelo Firewall; não crie encaminhamento no roteador. Use sempre o mesmo endereço durante uma sessão de login: `localhost` e o IP são hosts distintos e o navegador armazena cookies separados para cada um.
 
-## Modo Kiosk e manutenção
+## Login e resolução de problemas
 
-O Edge recebe `--kiosk` e `--edge-kiosk-type=fullscreen`: a interface não exibe barra de endereço, abas ou controles normais do navegador e o cliente não recebe um botão de saída. Para manutenção com teclado conectado ao simulador, pressione `Alt+F4` para sair do Edge e volte a iniciar `Start-Kiosk.ps1` depois.
+O login retorna um cookie assinado pelo backend. No modo HTTP local, os atributos são `HttpOnly`, `SameSite=Lax`, `Path=/` e `Secure` desativado; a sessão dura 8 horas. Em HTTPS, configure `RACING_COOKIE_SECURE=true`. O frontend envia credenciais same-origin, verifica `/api/auth/me` antes de redirecionar e mostra erros de autenticação/API no formulário.
 
-O modo do Edge não desativa a barra de tarefas ou o shell do Windows. Esta etapa não aplica Assigned Access nem esconde a barra de tarefas, conforme a restrição de não alterar o Windows. Não deixe teclado ou acesso ao desktop disponíveis ao público. A configuração para iniciar automaticamente após ligar o PC fica para uma etapa posterior, revisada com procedimento de recuperação.
+Se a página voltar ao login:
 
-Antes de encerrar o ambiente, termine a sessão pelo painel do operador. Então execute:
+1. Confirme que Operator e API estão no mesmo host/porta (não abra a página por IP e depois faça requisições por `localhost`).
+2. No DevTools → Network, confira `POST /api/auth/login` (200 ou 401), o `Set-Cookie` e a resposta de `GET /api/auth/me`. Não copie nem compartilhe o valor do cookie.
+3. Em DevTools → Application/Storage → Cookies, confira `racing_manager_session`, caminho `/`, `HttpOnly`, `SameSite=Lax` e a ausência de `Secure` quando acessado por HTTP.
+4. Se o login for 200 mas `/auth/me` retornar 401, confirme que o navegador permaneceu no mesmo hostname e que não há outro backend com uma `RACING_SECRET_KEY` diferente respondendo na porta 8000.
+5. Credenciais incorretas retornam “Usuário ou senha inválidos”. Contas Operator são criadas no Admin; não existe usuário padrão.
+6. Consulte `.runtime/backend-error.log` e `.runtime/backend.log` para erros de inicialização/serviço. Não publique esses logs sem revisá-los.
 
-```powershell
-.\scripts\Stop-TestEnvironment.ps1
-```
+Sair pelo botão encerra a sessão e limpa o cookie. Rotas administrativas continuam protegidas no backend; um Operator recebe 403 mesmo chamando diretamente a API.
 
-O script recusa encerrar o backend se houver uma sessão ativa e valida os PIDs guardados pelo próprio Racing Manager antes de fechar processos do Edge/backend. O banco e os logs são preservados em `data/` e `.runtime/`.
+## Sessão real com ACC
 
-## Steam e Assetto Corsa
+1. Inicie Steam manualmente e confirme no painel Operator que Steam/ACC aparecem disponíveis.
+2. Execute `Start-RacingManager.ps1 -ShortSessionTestMode` para habilitar opções transitórias de 1 e 2 minutos. O modo vale somente para o processo iniciado; ele não grava essas durações nos pacotes/configurações salvas. Para operação normal, inicie sem essa opção.
+3. No Operator, selecione 1 minuto e pressione **Iniciar Assetto Corsa Competizione**. O backend cria `Aguardando`, abre `steam://rungameid/805550`, e muda para `Em andamento` quando detecta o processo exato da instalação.
+4. Se a Steam mostrar uma janela de seleção de opção de inicialização, selecione a opção normal/de desktop do ACC. O backend espera o processo até o limite configurado; enquanto a Steam aguarda uma escolha, o estado permanece `Aguardando`.
+5. O Kiosk e o Operator recebem o cronômetro calculado pelo servidor. No fim, o backend manda `WM_CLOSE`, aguarda o período de tolerância e só então pode encerrar o PID validado pelo caminho exato do `AC2-Win64-Shipping.exe`. Não encerra a Steam.
+6. Confirme o estado `Concluída`, processo do jogo ausente e Kiosk de volta à tela de espera. Falhas de início, saída inesperada, travamento e encerramento aparecem no histórico e log.
 
-Abra a Steam no computador, entre manualmente com a conta dedicada ao equipamento e instale o Assetto Corsa. O sistema nunca lê nem armazena a senha Steam; inicia o jogo pelo cliente com `steam.exe -applaunch 244210`, verifica o AppID/manifesto e monitora `AssettoCorsa.exe`/`acs.exe` dentro da pasta de instalação.
-
-O diagnóstico local verifica o cliente ativo e uma conta marcada como recente em loginusers.vdf; isso não é uma API oficial de autenticação nem prova que a Steam aceitará a sessão. Se faltar instalação ou conta selecionada, o painel bloqueia o início e informa o motivo. Se o jogo não aparecer em 120 segundos após a solicitação, a sessão fica registrada como falha técnica.
-
-Como o equipamento é comercial e acessível ao público, **não presuma que uma licença Steam pessoal de varejo permite esse uso**. Consulte o [programa oficial Steam PC Café](https://partner.steamgames.com/doc/sitelicense), os [requisitos e cadastro](https://partner.steamgames.com/doc/sitelicense/licensees/signup) e o [modelo de servidor PC Café e pool de licenças](https://partner.steamgames.com/doc/sitelicense/licensees/gettingstarted/licensemodelpc). A documentação Steam informa que o servidor local participa da gestão de licenças comerciais e que só títulos incluídos pelo publicador estão disponíveis. Este adaptador ainda **não integra o Steam PC Café Server nem confirma licença comercial do AppID 244210**. Portanto, não use o sistema para sessões pagas até confirmar a elegibilidade/licença do Assetto Corsa e configurar o modo de acesso aprovado pela Steam para essa estação. Não use a conta pessoal do proprietário nem compartilhe credenciais.
-
-## Sessões, falhas e recuperação
-
-- As durações são configuradas no Admin e validadas novamente pela API.
-- O operador só inicia quando o adaptador informa Steam/jogo prontos; a interface não decide duração nem estado.
-- O estado inicial é `Aguardando`; só passa para `Em andamento` quando o processo do Assetto Corsa é encontrado.
-- Um supervisor no backend calcula o tempo, envia avisos em 2 minutos e 30 segundos e fecha o jogo no prazo. O navegador só mostra o tempo reportado pelo servidor.
-- No prazo, o integrador pede fechamento normal às janelas do jogo e, após o período de tolerância, encerra somente os PIDs cujos caminhos executáveis correspondem à instalação conhecida do Assetto Corsa.
-- Se o jogo sumir antes do prazo, a sessão fica `Interrompida`; falha de início, travamento ou encerramento controlado malsucedido ficam `Falha técnica`.
-- Ao reiniciar o computador/serviço, sessões que estavam abertas são fechadas como interrompidas/falha técnica. O jogo não é relançado.
-- Uma restrição única no banco impede duas sessões aguardando/em andamento simultâneas no mesmo simulador. O identificador UUID e a transição terminal tornam os ticks repetidos idempotentes.
-- Em bancos da versão anterior, a inicialização copia metadados de `racing_sessions` para a nova tabela operacional `sessions` de forma idempotente. Valores monetários não são lidos nem copiados; as tabelas antigas permanecem preservadas para não destruir dados existentes.
-
-O limite de tentativas de login é mantido em memória do processo e reinicia com ele. Use apenas uma instância local do backend nesta entrega.
-
-## Testes
+Para executar o teste automatizado **real** em banco temporário, separado dos testes simulados, com a Steam aberta e ACC instalado, use uma janela PowerShell de manutenção:
 
 ```powershell
-pytest
+$env:RACING_RUN_REAL_ACC_TESTS = '1'
+.\.venv\Scripts\python.exe -m pytest tests/real/test_acc_live.py -m real_integration -q
+Remove-Item Env:RACING_RUN_REAL_ACC_TESTS
 ```
 
-Os testes usam um adaptador Steam simulado e não precisam de Steam nem Assetto Corsa instalados.
+Esse teste abre o ACC real, roda uma sessão de 1 minuto e solicita o encerramento; não rode enquanto outro ACC estiver aberto. Se a Steam pedir uma opção de inicialização, selecione a opção normal/de desktop durante o teste. A suíte normal `pytest` não inicia o jogo e não exige instalação. O teste real verifica backend/Kiosk API e processo; a apresentação física do Edge e o uso do tablet ainda exigem validação visual no equipamento.
 
-## Hardware e VR (preparação)
+O backend pode ser encerrado com `Stop-TestEnvironment.ps1` somente sem sessão ativa. Para sair do Edge durante manutenção, use `Alt+F4`. Edge Kiosk oculta o navegador, mas não desativa barra de tarefas ou shell do Windows. Nenhum script inicia o jogo ao ligar o Windows.
 
-Veja [HARDWARE.md](HARDWARE.md). ODESC 4.2, Arduino Leonardo, volante artesanal, pedais, botões e Meta Quest 3S ainda não são acessados pelo software. Nenhum comando de torque ou movimento é enviado. A tela Kiosk usa viewport fluido e resolução 1920×1080 como alvo visual, mas ainda não implementa runtime ou apresentação VR.
+## Hardware
+
+ODESC 4.2, Arduino Leonardo, volante artesanal, pedais, botões e Meta Quest 3S ainda não são acessados. Veja [HARDWARE.md](HARDWARE.md). Nenhum comando de torque/movimento é enviado.

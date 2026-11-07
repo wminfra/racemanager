@@ -2,7 +2,9 @@ from pydantic import BaseModel, Field
 
 
 class SessionCreate(BaseModel):
-    duration_minutes: int = Field(ge=5, le=240)
+    # Whether 1/2-minute sessions are allowed is a server-side test-mode rule
+    # enforced by the session service, not a request-schema decision.
+    duration_minutes: int = Field(ge=1, le=240)
     simulator_id: int = Field(default=1, gt=0)
     game_id: int = Field(default=1, gt=0)
 

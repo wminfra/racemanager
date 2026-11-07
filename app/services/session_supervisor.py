@@ -11,10 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 class SessionSupervisor:
-    def __init__(self, session_factory, steam, launch_timeout_seconds: int = 120):
+    def __init__(self, session_factory, steam, launch_timeout_seconds: int = 120,
+                 unresponsive_grace_seconds: int = 60):
         self.session_factory = session_factory
         self.steam = steam
         self.launch_timeout_seconds = launch_timeout_seconds
+        self.unresponsive_grace_seconds = unresponsive_grace_seconds
 
     async def run(self):
         while True:
@@ -81,7 +83,8 @@ class SessionSupervisor:
                         details=f"session={session.public_id}"))
                 if not processes:
                     self._fail(db, session, now, f"{ASSETTO_CORSA_COMPETIZIONE.name} encerrou antes do fim da sessão.", "session.game_exited_unexpectedly", interrupted=True)
-                elif self.steam.is_game_unresponsive(processes):
+                elif ((now - started).total_seconds() >= self.unresponsive_grace_seconds
+                      and self.steam.is_game_unresponsive(processes)):
                     if simulator:
                         simulator.status = "game_unresponsive"
                     try:

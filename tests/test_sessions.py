@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import logging
 
 from sqlalchemy import func, select
 
@@ -21,12 +22,41 @@ def create_session(client, db_session, duration=15):
     return client.post("/api/sessions", json={"duration_minutes": duration, "simulator_id": 1, "game_id": 1})
 
 
-def test_session_starts_through_steam_adapter(client, db_session):
-    response = create_session(client, db_session)
+def test_session_starts_through_steam_adapter(client, db_session, caplog):
+    with caplog.at_level(logging.INFO, logger="app.services.sessions"):
+        response = create_session(client, db_session)
     assert response.status_code == 201
     assert response.json()["status"] == "waiting"
     assert client.steam.launch_calls == 1
     assert "gross_amount" not in response.json()
+    assert "[SESSION] Solicitação recebida." in caplog.text
+    assert "[SESSION] Simulador ID: 1." in caplog.text
+    assert "[SESSION] Jogo ID: 1." in caplog.text
+    assert "[SESSION] Verificando integração Steam." in caplog.text
+
+
+def test_game_mismatch_returns_specific_session_rejection_log(client, db_session, caplog, monkeypatch):
+    monkeypatch.setattr(settings, "short_session_test_mode", True)
+    operator_login(client, db_session)
+    game = db_session.get(Game, 1)
+    game.name = "Assetto Corsa"
+    db_session.commit()
+
+    with caplog.at_level(logging.INFO, logger="app.services.sessions"):
+        response = client.post("/api/sessions", json={
+            "duration_minutes": 2, "simulator_id": 1, "game_id": 1,
+        })
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Simulador ou jogo indisponível."
+    assert "[SESSION] Solicitação recebida." in caplog.text
+    assert "[SESSION] Simulador ID: 1." in caplog.text
+    assert "[SESSION] Jogo ID: 1." in caplog.text
+    assert "[SESSION] Verificando disponibilidade do simulador." in caplog.text
+    assert "[SESSION] Verificando disponibilidade do jogo." in caplog.text
+    assert "cadastrado='Assetto Corsa'; esperado='Assetto Corsa Competizione'" in caplog.text
+    assert "[SESSION] Motivo da rejeição:" in caplog.text
+    assert "[SESSION] Verificando integração Steam." not in caplog.text
 
 
 def test_two_simultaneous_sessions_are_prevented(client, db_session):
@@ -137,13 +167,28 @@ def test_unresponsive_game_is_a_technical_failure(client, db_session):
     create_session(client, db_session)
     row = db_session.scalar(select(RacingSession))
     row.status = "running"
-    row.started_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+    row.started_at = datetime.now(timezone.utc) - timedelta(seconds=70)
     db_session.commit()
     client.steam.unresponsive = True
     SessionSupervisor(client.session_factory, client.steam).tick()
     db_session.refresh(row)
     assert row.status == "technical_failure"
     assert "responder" in row.failure_reason
+
+
+def test_unresponsive_game_gets_startup_grace_period(client, db_session):
+    create_session(client, db_session)
+    row = db_session.scalar(select(RacingSession))
+    row.status = "running"
+    row.started_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+    db_session.commit()
+    client.steam.unresponsive = True
+
+    SessionSupervisor(client.session_factory, client.steam).tick()
+
+    db_session.refresh(row)
+    assert row.status == "running"
+    assert client.steam.close_calls == 0
 
 
 def test_restart_marks_open_session_interrupted_and_does_not_resume(client, db_session):

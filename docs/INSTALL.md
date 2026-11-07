@@ -75,7 +75,7 @@ Sair pelo botão encerra a sessão e limpa o cookie. Rotas administrativas conti
 
 1. Inicie Steam manualmente e confirme no painel Operator que Steam/ACC aparecem disponíveis.
 2. Execute `Start-RacingManager.ps1 -ShortSessionTestMode` para habilitar opções transitórias de 1 e 2 minutos. O modo vale somente para o processo iniciado; ele não grava essas durações nos pacotes/configurações salvas. Para operação normal, inicie sem essa opção.
-3. No Operator, selecione 1 minuto e pressione **Iniciar Assetto Corsa Competizione**. O backend cria `Aguardando`, abre `steam://rungameid/805550`, e muda para `Em andamento` quando detecta o processo exato da instalação.
+3. No Operator, selecione 2 minutos e pressione **Iniciar Assetto Corsa Competizione**. O backend cria `Aguardando`, abre `steam://rungameid/805550`, e muda para `Em andamento` quando detecta o processo exato da instalação.
 4. Se a Steam mostrar uma janela de seleção de opção de inicialização, selecione a opção normal/de desktop do ACC. O backend espera o processo até o limite configurado; enquanto a Steam aguarda uma escolha, o estado permanece `Aguardando`.
 5. O Kiosk e o Operator recebem o cronômetro calculado pelo servidor. No fim, o backend manda `WM_CLOSE`, aguarda o período de tolerância e só então pode encerrar o PID validado pelo caminho exato do `AC2-Win64-Shipping.exe`. Não encerra a Steam.
 6. Confirme o estado `Concluída`, processo do jogo ausente e Kiosk de volta à tela de espera. Falhas de início, saída inesperada, travamento e encerramento aparecem no histórico e log.
@@ -88,7 +88,7 @@ $env:RACING_RUN_REAL_ACC_TESTS = '1'
 Remove-Item Env:RACING_RUN_REAL_ACC_TESTS
 ```
 
-Esse teste abre o ACC real, roda uma sessão de 1 minuto e solicita o encerramento; não rode enquanto outro ACC estiver aberto. Se a Steam pedir uma opção de inicialização, selecione a opção normal/de desktop durante o teste. A suíte normal `pytest` não inicia o jogo e não exige instalação. O teste real verifica backend/Kiosk API e processo; a apresentação física do Edge e o uso do tablet ainda exigem validação visual no equipamento.
+Esse teste abre o ACC real, roda uma sessão de 2 minutos e solicita o encerramento; não rode enquanto outro ACC estiver aberto. Se a Steam pedir uma opção de inicialização, selecione a opção normal/de desktop durante o teste. A suíte normal `pytest` não inicia o jogo e não exige instalação. O teste real verifica backend/Kiosk API e processo; a apresentação física do Edge e o uso do tablet ainda exigem validação visual no equipamento.
 
 O backend pode ser encerrado com `Stop-TestEnvironment.ps1` somente sem sessão ativa. Para sair do Edge durante manutenção, use `Alt+F4`. Edge Kiosk oculta o navegador, mas não desativa barra de tarefas ou shell do Windows. Nenhum script inicia o jogo ao ligar o Windows.
 

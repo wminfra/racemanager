@@ -68,20 +68,48 @@ def _audit(db: Session, actor_id: int | None, action: str, session: RacingSessio
 
 def begin_session(db: Session, user: User, simulator_id: int, game_id: int,
                   duration_minutes: int, steam) -> RacingSession:
+    logger.info("[SESSION] Solicitação recebida.")
+    logger.info("[SESSION] Simulador ID: %s.", simulator_id)
+    logger.info("[SESSION] Jogo ID: %s.", game_id)
     if duration_minutes not in configured_durations(db, include_test_durations=True):
+        logger.warning("[SESSION] Motivo da rejeição: duração %s minutos não configurada.", duration_minutes)
         raise ValueError("Duração de sessão indisponível.")
     if db.scalar(select(RacingSession.id).where(
             RacingSession.simulator_id == simulator_id,
             RacingSession.status.in_(["waiting", "running"]))):
+        logger.warning("[SESSION] Motivo da rejeição: simulador ID %s já possui sessão ativa.", simulator_id)
         raise RuntimeError("O simulador já possui uma sessão ativa.")
+
+    logger.info("[SESSION] Verificando disponibilidade do simulador.")
     simulator = db.get(Simulator, simulator_id)
-    game = db.get(Game, game_id)
-    if not simulator or not game or not game.is_enabled or game.name != ASSETTO_CORSA_COMPETIZIONE.name:
+    if not simulator:
+        logger.warning("[SESSION] Motivo da rejeição: simulador ID %s não cadastrado.", simulator_id)
         raise ValueError("Simulador ou jogo indisponível.")
+    logger.info("[SESSION] Simulador encontrado; status cadastrado: %s.", simulator.status)
+
+    logger.info("[SESSION] Verificando disponibilidade do jogo.")
+    game = db.get(Game, game_id)
+    if not game:
+        logger.warning("[SESSION] Motivo da rejeição: jogo ID %s não cadastrado.", game_id)
+        raise ValueError("Simulador ou jogo indisponível.")
+    if not game.is_enabled:
+        logger.warning("[SESSION] Motivo da rejeição: jogo ID %s está desativado.", game_id)
+        raise ValueError("Simulador ou jogo indisponível.")
+    if game.name != ASSETTO_CORSA_COMPETIZIONE.name:
+        logger.warning(
+            "[SESSION] Motivo da rejeição: nome do jogo ID %s incompatível (cadastrado=%r; esperado=%r).",
+            game_id, game.name, ASSETTO_CORSA_COMPETIZIONE.name,
+        )
+        raise ValueError("Simulador ou jogo indisponível.")
+
+    logger.info("[SESSION] Verificando integração Steam.")
     readiness = steam.inspect()
     if not readiness["ready"]:
+        logger.warning("[SESSION] Motivo da rejeição: integração Steam não pronta (AppID=%s).",
+                       readiness.get("app_id", ASSETTO_CORSA_COMPETIZIONE.app_id))
         raise RuntimeError(readiness["reason"])
     if steam.find_game_processes():
+        logger.warning("[SESSION] Motivo da rejeição: ACC já está em execução.")
         raise RuntimeError(f"{ASSETTO_CORSA_COMPETIZIONE.name} já está em execução; não é possível iniciar outra sessão.")
     session = RacingSession(public_id=str(uuid4()), simulator_id=simulator_id,
         game_id=game_id, operator_id=user.id, status="waiting",

@@ -1,0 +1,1 @@
+"""Racing Manager application package."""

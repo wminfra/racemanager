@@ -19,7 +19,12 @@ def operator_login(client, db_session):
 
 def create_session(client, db_session, duration=15):
     operator_login(client, db_session)
-    return client.post("/api/sessions", json={"duration_minutes": duration, "simulator_id": 1, "game_id": 1})
+    response = client.post("/api/sessions", json={"duration_minutes": duration, "simulator_id": 1, "game_id": 1})
+    if response.status_code == 201:
+        supervisor = SessionSupervisor(client.session_factory, client.steam, guidance_duration_seconds=0)
+        supervisor.tick()
+        supervisor.tick()
+    return response
 
 
 def test_session_starts_through_steam_adapter(client, db_session, caplog):
@@ -33,6 +38,50 @@ def test_session_starts_through_steam_adapter(client, db_session, caplog):
     assert "[SESSION] Simulador ID: 1." in caplog.text
     assert "[SESSION] Jogo ID: 1." in caplog.text
     assert "[SESSION] Verificando integração Steam." in caplog.text
+
+
+def test_session_does_not_launch_game_before_guidance_finishes(client, db_session):
+    operator_login(client, db_session)
+    response = client.post("/api/sessions", json={
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+    })
+    row = db_session.scalar(select(RacingSession))
+    assert response.status_code == 201
+    assert row.status == "waiting"
+    assert row.guidance_started_at is not None
+    assert row.launch_requested_at is None
+    assert client.steam.launch_calls == 0
+
+
+def test_cancel_during_guidance_never_launches_or_closes_a_game(client, db_session):
+    operator_login(client, db_session)
+    response = client.post("/api/sessions", json={
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+    })
+    result = client.post(f"/api/sessions/{response.json()['id']}/cancel")
+    row = db_session.scalar(select(RacingSession))
+    assert result.status_code == 200
+    assert result.json()["status"] == "cancelled"
+    assert row.failure_reason == "Cancelada pelo operador antes do início da utilização."
+    assert client.steam.launch_calls == 0
+    assert client.steam.close_calls == 0
+
+
+def test_guidance_launch_records_failed_steam_attempt(client, db_session):
+    operator_login(client, db_session)
+    response = client.post("/api/sessions", json={
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+    })
+    supervisor = SessionSupervisor(client.session_factory, client.steam, guidance_duration_seconds=0)
+    client.steam.ready = False
+    supervisor.tick()
+    row = db_session.scalar(select(RacingSession))
+    assert response.status_code == 201
+    assert row.status == "technical_failure"
+    assert row.started_at is None
+    assert row.effective_seconds == 0
+    assert "Steam indisponível" in row.failure_reason
+    assert client.steam.launch_calls == 1
 
 
 def test_game_mismatch_returns_specific_session_rejection_log(client, db_session, caplog, monkeypatch):
@@ -70,7 +119,7 @@ def test_session_cannot_start_when_steam_is_not_ready(client, db_session):
     operator_login(client, db_session)
     client.steam.ready = False
     response = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1})
-    assert response.status_code == 409
+    assert response.status_code == 201
     assert client.steam.launch_calls == 0
 
 
@@ -89,7 +138,8 @@ def test_launch_failure_is_recorded(client, db_session):
     operator_login(client, db_session)
     client.steam.launch_error = "simulated launch failure"
     response = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1})
-    assert response.status_code == 409
+    SessionSupervisor(client.session_factory, client.steam, guidance_duration_seconds=0).tick()
+    assert response.status_code == 201
     row = db_session.scalar(select(RacingSession))
     assert row.status == "technical_failure"
     assert "simulated launch failure" in row.failure_reason
@@ -260,3 +310,52 @@ def test_kiosk_receives_public_read_only_websocket_state(client):
     assert update["type"] == "session_status"
     assert update["session"] is None
     assert "running_session" not in update
+
+
+def test_kiosk_initial_state_and_orientation_countdown_are_backend_driven(client, db_session, monkeypatch):
+    monkeypatch.setattr(settings, "guidance_duration_seconds", 15)
+    waiting = client.get("/api/kiosk/status").json()
+    assert waiting["screen"] == "waiting"
+    assert waiting["session"] is None
+    operator_login(client, db_session)
+    response = client.post("/api/sessions", json={
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+    })
+    guidance = client.get("/api/kiosk/status").json()
+    assert response.status_code == 201
+    assert guidance["screen"] == "guidance"
+    assert guidance["session"]["phase"] == "guidance"
+    assert 0 <= guidance["session"]["guidance_remaining_seconds"] <= 15
+    assert len(guidance["guidance_messages"]) == 3
+    assert client.steam.launch_calls == 0
+    assert "operator_id" not in guidance["session"]
+    assert "warning" not in guidance["session"]
+
+
+def test_kiosk_is_silent_during_game_then_shows_end_screen(client, db_session):
+    create_session(client, db_session)
+    running = client.get("/api/kiosk/status").json()
+    assert running["screen"] == "playing"
+    assert running["session"]["status"] == "running"
+    assert "warning" not in running["session"]
+    row = db_session.scalar(select(RacingSession))
+    row.started_at = datetime.now(timezone.utc) - timedelta(minutes=16)
+    db_session.commit()
+    SessionSupervisor(client.session_factory, client.steam).tick()
+    ended = client.get("/api/kiosk/status").json()
+    assert ended["screen"] == "ending"
+    assert ended["session"]["remaining_seconds"] == 0
+
+
+def test_kiosk_shows_generic_failure_after_delayed_launch_failure(client, db_session):
+    operator_login(client, db_session)
+    client.steam.launch_error = "steam launch failed"
+    response = client.post("/api/sessions", json={
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+    })
+    SessionSupervisor(client.session_factory, client.steam, guidance_duration_seconds=0).tick()
+    failure = client.get("/api/kiosk/status").json()
+    assert response.status_code == 201
+    assert failure["screen"] == "failure"
+    assert "failure_reason" not in failure["session"]
+    assert client.steam.close_calls == 0

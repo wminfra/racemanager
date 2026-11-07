@@ -95,3 +95,73 @@ O backend pode ser encerrado com `Stop-TestEnvironment.ps1` somente sem sessão 
 ## Hardware
 
 ODESC 4.2, Arduino Leonardo, volante artesanal, pedais, botões e Meta Quest 3S ainda não são acessados. Veja [HARDWARE.md](HARDWARE.md). Nenhum comando de torque/movimento é enviado.
+
+
+## Orientacoes antes da corrida e Kiosk
+
+Ao criar uma sessao, o Kiosk mostra as orientacoes fixas por 15 segundos. O
+backend e a autoridade do contador; o jogo nao e solicitado antes do fim desse
+periodo. Para ajustar a duracao em uma implantacao, configure
+`RACING_GUIDANCE_DURATION_SECONDS` no `.env` e reinicie o backend. As mensagens
+atuais ficam em `app/services/sessions.py`; a estrutura permite substitui-las
+por configuracao administrativa numa etapa futura.
+
+Durante o jogo, a tela Kiosk fica sem texto e sem avisos. Quando a sessao
+termina, ela mostra a tela de encerramento por alguns segundos. Falhas tecnicas
+mostram uma mensagem generica ao cliente; o detalhe fica no Operator/Admin e no
+log. Cancelar durante as orientacoes impede a chamada da Steam.
+
+## Overlay nativo do cronometro
+
+A instalacao `pip install -e ".[dev]"` inclui PySide6. O script
+`Start-RacingManager.ps1` inicia o overlay independente antes do Edge e evita
+duplicar a instancia registrada. Para inicia-lo manualmente:
+
+```powershell
+.\.venv\Scripts\pythonw.exe -m app.modules.overlay
+```
+
+Ele consome somente o WebSocket publico e somente de leitura do Kiosk em
+`127.0.0.1`; o backend continua calculando o tempo. O overlay nao tem botoes,
+nao recebe foco e nao aceita entrada. Ele permanece oculto sem sessao ativa.
+Acima de 2 minutos usa apresentacao normal; aos 2 minutos destaca discretamente;
+aos 30 segundos pisca em vermelho e acelera aos 10 segundos. Ao concluir,
+apresenta `00:00` brevemente. O `Stop-TestEnvironment.ps1` encerra apenas o
+`pythonw.exe` cujo PID, executavel e linha de comando correspondam ao overlay
+registrado por este projeto.
+
+Para testar sobre o ACC real, inicie o ambiente pelo script geral, crie uma
+sessao no Operator e aguarde as orientacoes e a deteccao do jogo. O overlay so
+aparece depois que o backend detecta o processo validado do ACC. O teste visual
+precisa ser feito no computador do simulador; a suite automatizada nao abre o
+jogo nem valida composicao grafica real.
+
+A janela usa flags Qt de topo, sem foco e transparente para entrada. Isso
+permite desenhar sobre aplicativos em modo janela/borderless. Alguns drivers e
+a configuracao de tela cheia exclusiva do jogo podem impedir composicao de
+janelas externas; se isso ocorrer, configure o ACC para **Windowed/Borderless**
+(sem borda) nas opcoes de video e reinicie o jogo. A tela cheia exclusiva nao e
+considerada validada neste projeto; teste os dois modos no equipamento antes da
+operacao comercial. O overlay tambem depende da sessao grafica interativa do
+Windows e nao e um servico de sistema.
+
+## Historico operacional no Admin
+
+No painel Admin, a secao **Historico operacional** lista solicitacao,
+orientacoes, pedido de abertura, inicio (primeira deteccao do processo), pedido
+de encerramento e encerramento confirmado. A duracao efetiva comeca em
+`started_at`, quando o processo real do ACC e detectado; o tempo de orientacao
+e de inicializacao nao e contabilizado. Falhas antes dessa deteccao tem zero
+segundos efetivos. O fechamento por tempo usa o prazo oficial do backend; o
+horario de encerramento registrado e quando o fechamento foi confirmado.
+
+Use filtros de data, operador, jogo e status. Os indicadores sao calculados
+sobre o resultado filtrado. **Exportar CSV** aplica os mesmos filtros, inclui
+BOM UTF-8 para Excel e nao contem valores financeiros. A API e exclusiva de
+administradores: `GET /api/admin/history` e `GET /api/admin/history.csv`.
+
+A primeira inicializacao aplica uma migracao aditiva idempotente que acrescenta
+`guidance_started_at`, `launch_requested_at` e `end_requested_at` como colunas
+nulas. Ela nao recria tabelas nem remove registros existentes. Registros
+anteriores permanecem no historico; dados de operador/jogo/simulador ausentes
+sao identificados como removidos ou desconhecidos.

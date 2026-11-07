@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -12,7 +13,8 @@ from app.api.realtime import router as realtime_router
 from app.core.config import settings
 from app.database.session import Base, SessionLocal, engine
 from app.models import AppSetting, Game, Simulator
-from app.database.migrations import migrate_legacy_sessions, recover_open_sessions
+from app.database.migrations import (migrate_legacy_sessions, migrate_session_operational_columns,
+                                    recover_open_sessions)
 from app.modules.steam.integration import SteamIntegration
 from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
 from app.services.session_supervisor import SessionSupervisor
@@ -32,9 +34,14 @@ async def lifespan(app: FastAPI):
         if not db.get(AppSetting, "session_durations_minutes"):
             db.add(AppSetting(key="session_durations_minutes", value="15,30,60"))
             db.commit()
+        migrate_session_operational_columns(db)
         migrate_legacy_sessions(db)
         recover_open_sessions(db, app.state.steam)
-    supervisor = SessionSupervisor(app.state.session_factory, app.state.steam)
+    supervisor = SessionSupervisor(app.state.session_factory, app.state.steam,
+        guidance_duration_seconds=settings.guidance_duration_seconds,
+        unresponsive_grace_seconds=60,
+        transition_lock=app.state.session_transition_lock)
+    app.state.supervisor = supervisor
     app.state.supervisor_task = asyncio.create_task(supervisor.run())
     yield
     app.state.supervisor_task.cancel()
@@ -51,6 +58,7 @@ app = FastAPI(title="Racing Manager", version="0.1.0", lifespan=lifespan)
 app.state.engine = engine
 app.state.session_factory = SessionLocal
 app.state.steam = SteamIntegration(settings)
+app.state.session_transition_lock = threading.RLock()
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie=settings.session_cookie,
                    https_only=settings.cookie_secure, same_site="lax", path="/", max_age=8 * 60 * 60)
 app.include_router(router, prefix="/api")

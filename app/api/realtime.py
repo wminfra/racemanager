@@ -5,7 +5,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
 from app.models import RacingSession, User
-from app.services.sessions import session_view
+from app.services.sessions import public_kiosk_state, session_view
 
 router = APIRouter()
 
@@ -22,16 +22,22 @@ async def _send_status(websocket: WebSocket, public: bool = False, user_id: int 
             session = db.scalar(select(RacingSession).where(
                 RacingSession.simulator_id == 1,
                 RacingSession.status.in_(["waiting", "running"])))
+            public_state = public_kiosk_state(db) if public else None
         value = session_view(session) if session else None
-        if public and value:
-            value = {key: value[key] for key in ("id", "status", "remaining_seconds", "warning")}
-        simulator_status = "game_running" if value and value["status"] == "running" else "starting" if value else "waiting"
-        if public and not value and websocket.app.state.steam.find_game_processes():
-            simulator_status = "unmanaged_game_running"
-        await websocket.send_json({"type": "session_status",
-                                   "session" if public else "running_session": value,
-                                   "simulator_status": simulator_status,
-                                   "screen": "session" if value and value["status"] == "running" else "waiting"})
+        if public:
+            game_running = bool(websocket.app.state.steam.find_game_processes())
+            simulator_status = ("game_running" if public_state["screen"] == "playing" else
+                                "unmanaged_game_running" if game_running and public_state["screen"] == "waiting" else
+                                "starting" if public_state["screen"] == "guidance" else "waiting")
+            await websocket.send_json({"type": "session_status", **public_state,
+                                       "simulator_status": simulator_status})
+        else:
+            phase = value["phase"] if value else None
+            screen = ("playing" if value and value["status"] == "running" else
+                      "guidance" if value and phase in {"guidance", "launching"} else "waiting")
+            await websocket.send_json({"type": "session_status", "running_session": value,
+                                       "simulator_status": "game_running" if screen == "playing" else "starting" if screen == "guidance" else "waiting",
+                                       "screen": screen})
         await asyncio.sleep(1)
 
 

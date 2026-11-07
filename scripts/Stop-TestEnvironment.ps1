@@ -4,9 +4,23 @@ $RuntimePath = Join-Path $ProjectRoot '.runtime'
 
 try {
     $Status = Invoke-RestMethod 'http://127.0.0.1:8000/api/kiosk/status' -TimeoutSec 2
-    if ($Status.session) { throw 'Existe uma sessão aguardando ou em andamento. Encerre-a pelo painel do operador antes de parar o ambiente.' }
+    if ($Status.session -and $Status.session.status -in @('waiting', 'running')) {
+        throw 'Existe uma sessão aguardando orientações, inicialização ou em andamento. Encerre-a pelo painel do operador antes de parar o ambiente.'
+    }
 } catch {
     if ($_.Exception.Message -match 'Existe uma sessão') { throw }
+}
+
+$OverlayState = Join-Path $RuntimePath 'overlay.json'
+if (Test-Path -LiteralPath $OverlayState) {
+    $State = Get-Content -LiteralPath $OverlayState -Raw | ConvertFrom-Json
+    $ExpectedPythonw = Join-Path $ProjectRoot '.venv\Scripts\pythonw.exe'
+    $Process = Get-CimInstance Win32_Process -Filter "ProcessId = $($State.pid)" -ErrorAction SilentlyContinue
+    if ($Process -and $Process.Name -eq 'pythonw.exe' -and $Process.ExecutablePath -eq $ExpectedPythonw -and
+        $Process.CommandLine -match 'app\.modules\.overlay') {
+        Stop-Process -Id ([int]$State.pid) -Force
+    }
+    Remove-Item -LiteralPath $OverlayState -Force
 }
 
 $KioskState = Join-Path $RuntimePath 'kiosk.json'
@@ -29,4 +43,4 @@ if (Test-Path -LiteralPath $BackendState) {
     }
     Remove-Item -LiteralPath $BackendState -Force
 }
-Write-Host 'Ambiente iniciado por estes scripts foi encerrado. Os arquivos de log e o banco foram preservados.'
+Write-Host 'Ambiente iniciado por estes scripts foi encerrado. Overlay, Edge e backend foram parados; logs e banco foram preservados.'

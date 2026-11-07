@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     steam_library_path: str = ""
     assetto_corsa_path: str = ""
     short_session_test_mode: bool = False
+    guidance_duration_seconds: int = 15
+    session_end_display_seconds: int = 4
+    session_failure_display_seconds: int = 8
+    overlay_backend_url: str = "http://127.0.0.1:8000"
 
 
 settings = Settings()

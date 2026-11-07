@@ -36,6 +36,8 @@ class FakeSteam:
         self.launch_calls += 1
         if self.launch_error:
             raise RuntimeError(self.launch_error)
+        if not self.ready:
+            raise RuntimeError("Steam indisponível")
         self.running = self.auto_start
 
     def close_game(self, grace_seconds=8):

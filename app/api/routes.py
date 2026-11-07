@@ -1,7 +1,10 @@
 import time
-from datetime import datetime, timezone
+import csv
+import io
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -13,8 +16,9 @@ from app.schemas.auth import LoginRequest, UserCreate
 from app.schemas.session import SessionCreate, SessionDurationsUpdate
 from app.services.audit import record
 from app.services.auth import hash_password, verify_password
+from app.services.history import HISTORY_STATUSES, read_history
 from app.services.sessions import (begin_session, cancel_waiting_session, configured_durations,
-                                   end_running_session, session_view)
+                                   end_running_session, public_kiosk_state, session_view)
 
 router = APIRouter()
 _login_attempts: dict[str, list[float]] = {}
@@ -110,13 +114,12 @@ def operator_history(db: Session = Depends(get_db), user: User = Depends(current
 @router.get("/kiosk/status")
 def kiosk_status(request: Request, db: Session = Depends(get_db)):
     simulator = db.get(Simulator, 1)
-    session = _active_session(db, 1)
-    value = session_view(session) if session else None
+    state = public_kiosk_state(db)
     game_running = bool(request.app.state.steam.find_game_processes())
-    state = "game_running" if value and value["status"] == "running" else "starting" if value else "unmanaged_game_running" if game_running else "waiting"
-    return {"simulator_status": state,
-            "session": {"id": value["id"], "status": value["status"],
-                        "remaining_seconds": value["remaining_seconds"], "warning": value["warning"]} if value else None,
+    simulator_status = ("game_running" if state["screen"] == "playing" else
+                        "unmanaged_game_running" if game_running and state["screen"] == "waiting" else
+                        "starting" if state["screen"] == "guidance" else "waiting")
+    return {**state, "simulator_status": simulator_status,
             "simulator": simulator.name if simulator else "Simulador"}
 
 
@@ -124,8 +127,9 @@ def kiosk_status(request: Request, db: Session = Depends(get_db)):
 def start_session(payload: SessionCreate, request: Request,
                   db: Session = Depends(get_db), user: User = Depends(current_user)):
     try:
-        session = begin_session(db, user, payload.simulator_id, payload.game_id,
-                                payload.duration_minutes, request.app.state.steam)
+        with request.app.state.session_transition_lock:
+            session = begin_session(db, user, payload.simulator_id, payload.game_id,
+                                    payload.duration_minutes, request.app.state.steam)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except RuntimeError as exc:
@@ -137,7 +141,9 @@ def start_session(payload: SessionCreate, request: Request,
 def cancel_session(public_id: str, request: Request,
                    db: Session = Depends(get_db), user: User = Depends(current_user)):
     try:
-        return session_view(cancel_waiting_session(db, public_id, user, request.app.state.steam))
+        with request.app.state.session_transition_lock:
+            session = cancel_waiting_session(db, public_id, user, request.app.state.steam)
+        return session_view(session)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:
@@ -148,7 +154,9 @@ def cancel_session(public_id: str, request: Request,
 def finish_session(public_id: str, request: Request,
                    db: Session = Depends(get_db), user: User = Depends(current_user)):
     try:
-        return session_view(end_running_session(db, public_id, user, request.app.state.steam))
+        with request.app.state.session_transition_lock:
+            session = end_running_session(db, public_id, user, request.app.state.steam)
+        return session_view(session)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RuntimeError as exc:
@@ -176,6 +184,46 @@ def admin_summary(db: Session = Depends(get_db), admin: User = Depends(admin_use
     return {"sessions_total": len(sessions), "by_status": counts,
             "operators": db.scalar(select(func.count(User.id)).where(User.role == "operator")) or 0,
             "active_session": next((session_view(s) for s in sessions if s.status in {"waiting", "running"}), None)}
+
+
+def _admin_history_data(date_from: date | None, date_to: date | None,
+                        operator_id: int | None, game_id: int | None, status: str | None,
+                        db: Session):
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "A data inicial deve ser anterior ou igual à data final.")
+    if status and status not in HISTORY_STATUSES:
+        raise HTTPException(422, "Status de sessão inválido.")
+    return read_history(db, date_from, date_to, operator_id, game_id, status)
+
+
+@router.get("/admin/history")
+def admin_history(date_from: date | None = None, date_to: date | None = None,
+                  operator_id: int | None = Query(default=None, gt=0),
+                  game_id: int | None = Query(default=None, gt=0), status: str | None = None,
+                  db: Session = Depends(get_db), admin: User = Depends(admin_user)):
+    return _admin_history_data(date_from, date_to, operator_id, game_id, status, db)
+
+
+@router.get("/admin/history.csv")
+def export_admin_history(date_from: date | None = None, date_to: date | None = None,
+                         operator_id: int | None = Query(default=None, gt=0),
+                         game_id: int | None = Query(default=None, gt=0), status: str | None = None,
+                         db: Session = Depends(get_db), admin: User = Depends(admin_user)):
+    result = _admin_history_data(date_from, date_to, operator_id, game_id, status, db)
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow(("ID", "Sessão", "Data", "Solicitada em", "Orientações iniciadas em",
+                     "Jogo solicitado em", "Início da utilização", "Encerramento solicitado em",
+                     "Encerrada em", "Operador", "Jogo", "Simulador", "Duração contratada (min)",
+                     "Duração efetiva (s)", "Status", "Motivo"))
+    for item in result["items"]:
+        writer.writerow((item["id"], item["session_id"], item["date"], item["requested_at"],
+                         item["guidance_started_at"], item["launch_requested_at"], item["started_at"],
+                         item["end_requested_at"], item["ended_at"], item["operator"], item["game"],
+                         item["simulator"], item["contracted_minutes"], item["effective_seconds"],
+                         item["status"], item["reason"] or ""))
+    return Response("\ufeff" + output.getvalue(), media_type="text/csv",
+                    headers={"Content-Disposition": "attachment; filename=racing_manager_history.csv"})
 
 
 @router.get("/admin/session-durations")

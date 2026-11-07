@@ -52,6 +52,26 @@ def migrate_legacy_sessions(db: Session) -> int:
     return migrated
 
 
+def migrate_session_operational_columns(db: Session) -> list[str]:
+    """Add nullable operational timestamps without rebuilding or dropping session history."""
+    bind = db.get_bind()
+    if "sessions" not in inspect(bind).get_table_names():
+        return []
+    available = {column["name"] for column in inspect(bind).get_columns("sessions")}
+    additions = {
+        "guidance_started_at": "DATETIME",
+        "launch_requested_at": "DATETIME",
+        "end_requested_at": "DATETIME",
+    }
+    added = []
+    with bind.begin() as connection:
+        for name, sql_type in additions.items():
+            if name not in available:
+                connection.exec_driver_sql(f"ALTER TABLE sessions ADD COLUMN {name} {sql_type}")
+                added.append(name)
+    return added
+
+
 def _datetime(value):
     if isinstance(value, str):
         return datetime.fromisoformat(value)
@@ -63,11 +83,14 @@ def recover_open_sessions(db: Session, steam) -> int:
     active = db.scalars(select(RacingSession).where(RacingSession.status.in_(["waiting", "running"]))).all()
     if not active:
         return 0
+    should_close_game = any(session.status == "running" or session.launch_requested_at is not None
+                            for session in active)
     close_failed = False
-    try:
-        steam.close_game()
-    except Exception:
-        close_failed = True
+    if should_close_game:
+        try:
+            steam.close_game()
+        except Exception:
+            close_failed = True
     now = datetime.now(timezone.utc)
     for session in active:
         if session.status == "running" and session.started_at:

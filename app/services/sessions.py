@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from uuid import uuid4
 
@@ -11,6 +11,11 @@ from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
 from app.core.config import settings
 
 DEFAULT_DURATIONS = [15, 30, 60]
+GUIDANCE_MESSAGES = (
+    "Ajuste o banco, o volante e os pedais antes de começar.",
+    "Mantenha as mãos no volante e siga as orientações do estabelecimento.",
+    "O Assetto Corsa Competizione será iniciado automaticamente.",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +36,12 @@ def configured_durations(db: Session, include_test_durations: bool = False) -> l
 
 
 def session_view(session: RacingSession) -> dict:
+    created = session.created_at
+    if created and created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    guidance_started = session.guidance_started_at
+    if guidance_started and guidance_started.tzinfo is None:
+        guidance_started = guidance_started.replace(tzinfo=timezone.utc)
     started = session.started_at
     if started and started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
@@ -44,14 +55,30 @@ def session_view(session: RacingSession) -> dict:
             warning = "30_seconds"
         elif remaining <= 120:
             warning = "2_minutes"
+    phase = session.status
+    guidance_remaining = None
+    if session.status == "waiting":
+        if session.launch_requested_at:
+            phase = "launching"
+        elif guidance_started:
+            phase = "guidance"
+            guidance_remaining = max(0, settings.guidance_duration_seconds -
+                                     int((now - guidance_started).total_seconds()))
+        else:
+            phase = "launching"
     return {
         "id": session.public_id,
         "simulator_id": session.simulator_id,
         "game_id": session.game_id,
         "operator_id": session.operator_id,
         "status": session.status,
-        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "phase": phase,
+        "created_at": created.isoformat() if created else None,
+        "guidance_started_at": guidance_started.isoformat() if guidance_started else None,
+        "guidance_remaining_seconds": guidance_remaining,
+        "launch_requested_at": session.launch_requested_at.isoformat() if session.launch_requested_at else None,
         "started_at": started.isoformat() if started else None,
+        "end_requested_at": session.end_requested_at.isoformat() if session.end_requested_at else None,
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,
         "contracted_minutes": session.contracted_minutes,
         "effective_seconds": session.effective_seconds,
@@ -59,6 +86,43 @@ def session_view(session: RacingSession) -> dict:
         "warning": warning,
         "failure_reason": session.failure_reason,
     }
+
+
+def public_kiosk_state(db: Session) -> dict:
+    """Return only the public screen state and fields needed by Kiosk/overlay clients."""
+    now = datetime.now(timezone.utc)
+    active = db.scalar(select(RacingSession).where(
+        RacingSession.simulator_id == 1,
+        RacingSession.status.in_(["waiting", "running"])))
+    if active:
+        value = session_view(active)
+        phase = value["phase"]
+        screen = "playing" if active.status == "running" else "guidance"
+        public_session = {key: value[key] for key in (
+            "id", "status", "phase", "remaining_seconds", "guidance_remaining_seconds"
+        )}
+        return {"screen": screen, "session": public_session,
+                "guidance_messages": list(GUIDANCE_MESSAGES) if phase in {"guidance", "launching"} else []}
+
+    terminal = db.scalar(select(RacingSession).where(
+        RacingSession.simulator_id == 1,
+        RacingSession.status.in_(["completed", "technical_failure", "interrupted"])
+    ).order_by(RacingSession.ended_at.desc()).limit(1))
+    if terminal and terminal.ended_at:
+        ended = terminal.ended_at
+        if ended.tzinfo is None:
+            ended = ended.replace(tzinfo=timezone.utc)
+        age = (now - ended).total_seconds()
+        display_for = (settings.session_end_display_seconds if terminal.status == "completed"
+                       else settings.session_failure_display_seconds)
+        if 0 <= age <= display_for:
+            screen = "ending" if terminal.status == "completed" else "failure"
+            return {"screen": screen, "session": {
+                "id": terminal.public_id, "status": terminal.status, "phase": terminal.status,
+                "remaining_seconds": 0 if terminal.status == "completed" else None,
+                "guidance_remaining_seconds": None,
+            }, "guidance_messages": []}
+    return {"screen": "waiting", "session": None, "guidance_messages": []}
 
 
 def _audit(db: Session, actor_id: int | None, action: str, session: RacingSession, details: str = ""):
@@ -103,17 +167,13 @@ def begin_session(db: Session, user: User, simulator_id: int, game_id: int,
         raise ValueError("Simulador ou jogo indisponível.")
 
     logger.info("[SESSION] Verificando integração Steam.")
-    readiness = steam.inspect()
-    if not readiness["ready"]:
-        logger.warning("[SESSION] Motivo da rejeição: integração Steam não pronta (AppID=%s).",
-                       readiness.get("app_id", ASSETTO_CORSA_COMPETIZIONE.app_id))
-        raise RuntimeError(readiness["reason"])
     if steam.find_game_processes():
         logger.warning("[SESSION] Motivo da rejeição: ACC já está em execução.")
         raise RuntimeError(f"{ASSETTO_CORSA_COMPETIZIONE.name} já está em execução; não é possível iniciar outra sessão.")
+    now = datetime.now(timezone.utc)
     session = RacingSession(public_id=str(uuid4()), simulator_id=simulator_id,
         game_id=game_id, operator_id=user.id, status="waiting",
-        created_at=datetime.now(timezone.utc), contracted_minutes=duration_minutes)
+        created_at=now, guidance_started_at=now, contracted_minutes=duration_minutes)
     db.add(session)
     _audit(db, user.id, "session.start_requested", session, f"duration={duration_minutes}m")
     try:
@@ -121,16 +181,6 @@ def begin_session(db: Session, user: User, simulator_id: int, game_id: int,
     except IntegrityError as exc:
         db.rollback()
         raise RuntimeError("O simulador já possui uma sessão ativa.") from exc
-    try:
-        steam.launch_game()
-    except Exception as exc:
-        session.status = "technical_failure"
-        session.ended_at = datetime.now(timezone.utc)
-        session.failure_reason = str(exc)[:1000]
-        _audit(db, user.id, "session.launch_failed", session, session.failure_reason)
-        logger.exception("Could not launch %s for session %s", ASSETTO_CORSA_COMPETIZIONE.name, session.public_id)
-        db.commit()
-        raise RuntimeError(session.failure_reason) from exc
     return session
 
 
@@ -140,10 +190,12 @@ def cancel_waiting_session(db: Session, public_id: str, user: User, steam) -> Ra
         raise LookupError("Sessão não encontrada.")
     if session.status != "waiting":
         raise RuntimeError("Somente uma sessão aguardando pode ser cancelada.")
-    steam.close_game()
+    if session.launch_requested_at:
+        steam.close_game()
     session.status = "cancelled"
     session.ended_at = datetime.now(timezone.utc)
     session.effective_seconds = 0
+    session.failure_reason = "Cancelada pelo operador antes do início da utilização."
     _audit(db, user.id, "session.cancelled", session)
     db.commit()
     return session
@@ -155,6 +207,8 @@ def end_running_session(db: Session, public_id: str, user: User, steam) -> Racin
         raise LookupError("Sessão não encontrada.")
     if session.status != "running":
         raise RuntimeError("A sessão não está em andamento.")
+    end_requested = datetime.now(timezone.utc)
+    session.end_requested_at = end_requested
     steam.close_game()
     if steam.find_game_processes():
         raise RuntimeError("O jogo não encerrou; verifique o computador do simulador.")
@@ -163,7 +217,7 @@ def end_running_session(db: Session, public_id: str, user: User, steam) -> Racin
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
     session.ended_at = now
-    session.effective_seconds = max(0, int((now - started).total_seconds()))
+    session.effective_seconds = max(0, int((end_requested - started).total_seconds()))
     session.status = "completed"
     _audit(db, user.id, "session.ended_by_operator", session)
     db.commit()

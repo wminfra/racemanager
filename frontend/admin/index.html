@@ -1,7 +1,146 @@
-<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Racing Manager | Admin</title><link rel="stylesheet" href="/assets/app.css"></head><body><main class="shell"><header class="top"><div class="brand"><b>RM</b> / ADMIN</div><button class="btn secondary" onclick="logout()">Sair</button></header><section id="login"><div class="eyebrow">CONFIGURAÇÃO DO SISTEMA</div><h1 class="title">Acesso administrativo</h1><form class="form" onsubmit="login(event,'/admin')"><input class="input" name="username" autocomplete="username" placeholder="Usuário" required><input class="input" name="password" type="password" autocomplete="current-password" placeholder="Senha" required><button class="btn">Entrar</button><div id="notice" class="notice"></div></form></section><section id="dashboard" class="hidden"><div class="eyebrow">CONTROLE OPERACIONAL</div><h1 class="title">Visão geral</h1><div class="grid"><article class="card"><div class="eyebrow">SESSÕES REGISTRADAS</div><div id="count" class="metric">—</div></article><article class="card"><div class="eyebrow">EM ANDAMENTO</div><div id="running" class="metric">—</div></article><article class="card"><div class="eyebrow">FALHAS TÉCNICAS</div><div id="failures" class="metric">—</div></article></div><div class="grid admin-grid"><article class="card"><h2>Durações disponíveis</h2><p class="muted">Essas opções aparecem para o operador. Não incluem valores ou cobrança.</p><form id="durations" class="form"><input class="input" name="durations" placeholder="15, 30, 60" aria-label="Durações em minutos separadas por vírgula" required><button class="btn">Salvar durações</button><div id="duration-notice" class="notice"></div></form></article><article class="card"><h2>Criar operador</h2><form id="create-user" class="form"><input class="input" name="username" placeholder="Usuário" minlength="3" required><input class="input" name="password" type="password" placeholder="Senha (mínimo 12 caracteres)" minlength="12" required><button class="btn">Adicionar operador</button><div id="admin-notice" class="notice"></div></form></article></div><article class="card"><h2>Estado das sessões</h2><div id="statuses" class="status-list"></div></article></section></main><script src="/assets/app.js"></script><script>
-const names={waiting:'Aguardando jogo',running:'Em andamento',completed:'Concluídas',cancelled:'Canceladas',interrupted:'Interrompidas',technical_failure:'Falhas técnicas'};
-async function init(){let u;try{u=await api('/auth/me')}catch(e){if(e.status===401)return;document.querySelector('#notice').textContent='Não foi possível validar a sessão: '+e.message;return}if(u.role!=='admin'){document.querySelector('#notice').textContent='Acesso restrito a administradores.';return}document.querySelector('#login').classList.add('hidden');document.querySelector('#dashboard').classList.remove('hidden');try{const s=await api('/admin/summary');document.querySelector('#count').textContent=s.sessions_total;document.querySelector('#running').textContent=s.by_status.running+s.by_status.waiting;document.querySelector('#failures').textContent=s.by_status.technical_failure;const list=document.querySelector('#statuses');for(const [key,label] of Object.entries(names)){const row=document.createElement('div');row.className='status-row';const title=document.createElement('span');title.textContent=label;const value=document.createElement('b');value.textContent=s.by_status[key];row.append(title,value);list.append(row)}const d=await api('/admin/session-durations');document.querySelector('[name=durations]').value=d.durations.join(', ')}catch(e){document.querySelector('#admin-notice').textContent='Login efetuado, mas não foi possível carregar a configuração: '+e.message}}
-document.querySelector('#create-user').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.target);try{await api('/admin/users',{method:'POST',body:JSON.stringify({username:f.get('username'),password:f.get('password'),role:'operator'})});document.querySelector('#admin-notice').textContent='Operador criado.';e.target.reset()}catch(err){document.querySelector('#admin-notice').textContent=err.message}});
-document.querySelector('#durations').addEventListener('submit',async e=>{e.preventDefault();try{const values=document.querySelector('[name="durations"]').value.split(',').map(v=>Number(v.trim()));const d=await api('/admin/session-durations',{method:'PUT',body:JSON.stringify({durations:values})});document.querySelector('[name="durations"]').value=d.durations.join(', ');document.querySelector('#duration-notice').textContent='Durações atualizadas.'}catch(err){document.querySelector('#duration-notice').textContent=err.message}});
-init();
-</script></body></html>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Racing Manager | Admin</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div class="brand"><b>RM</b> / ADMIN</div>
+      <button class="btn secondary" onclick="logout()">Sair</button>
+    </header>
+    <section id="login">
+      <div class="eyebrow">CONFIGURAÇÃO DO SISTEMA</div>
+      <h1 class="title">Acesso administrativo</h1>
+      <form class="form" onsubmit="login(event,'/admin')">
+        <input class="input" name="username" autocomplete="username" placeholder="Usuário" required>
+        <input class="input" name="password" type="password" autocomplete="current-password" placeholder="Senha" required>
+        <button class="btn">Entrar</button><div id="notice" class="notice"></div>
+      </form>
+    </section>
+
+    <section id="dashboard" class="hidden">
+      <div class="eyebrow">CONTROLE OPERACIONAL</div>
+      <h1 class="title">Visão geral</h1>
+      <div class="grid">
+        <article class="card"><div class="eyebrow">SESSÕES REGISTRADAS</div><div id="count" class="metric">—</div></article>
+        <article class="card"><div class="eyebrow">EM ANDAMENTO</div><div id="running" class="metric">—</div></article>
+        <article class="card"><div class="eyebrow">FALHAS TÉCNICAS</div><div id="failures" class="metric">—</div></article>
+      </div>
+
+      <div class="grid admin-grid">
+        <article class="card">
+          <h2>Durações disponíveis</h2>
+          <p class="muted">Essas opções aparecem para o operador. Não incluem valores ou cobrança.</p>
+          <form id="durations" class="form">
+            <input class="input" name="durations" placeholder="15, 30, 60" aria-label="Durações em minutos separadas por vírgula" required>
+            <button class="btn">Salvar durações</button><div id="duration-notice" class="notice"></div>
+          </form>
+        </article>
+        <article class="card">
+          <h2>Criar operador</h2>
+          <form id="create-user" class="form">
+            <input class="input" name="username" placeholder="Usuário" minlength="3" required>
+            <input class="input" name="password" type="password" placeholder="Senha (mínimo 12 caracteres)" minlength="12" required>
+            <button class="btn">Adicionar operador</button><div id="admin-notice" class="notice"></div>
+          </form>
+        </article>
+      </div>
+
+      <article class="card">
+        <h2>Estado das sessões</h2><div id="statuses" class="status-list"></div>
+      </article>
+
+      <section class="card history-card">
+        <div class="row spread"><div><div class="eyebrow">AUDITORIA DE UTILIZAÇÃO</div><h2>Histórico operacional</h2></div>
+          <button id="export-history" class="btn secondary" type="button">Exportar CSV</button></div>
+        <div class="grid history-metrics">
+          <article class="card"><div class="eyebrow">TOTAL</div><div id="history-total" class="metric">0</div></article>
+          <article class="card"><div class="eyebrow">CONCLUÍDAS</div><div id="history-completed" class="metric">0</div></article>
+          <article class="card"><div class="eyebrow">CANCELADAS</div><div id="history-cancelled" class="metric">0</div></article>
+          <article class="card"><div class="eyebrow">INTERROMPIDAS</div><div id="history-interrupted" class="metric">0</div></article>
+          <article class="card"><div class="eyebrow">FALHAS TÉCNICAS</div><div id="history-failed" class="metric">0</div></article>
+          <article class="card"><div class="eyebrow">TEMPO UTILIZADO</div><div id="history-time" class="metric">0 min</div></article>
+        </div>
+        <form id="history-filters" class="history-filters">
+          <label>Data inicial<input class="input" name="date_from" type="date"></label>
+          <label>Data final<input class="input" name="date_to" type="date"></label>
+          <label>Operador<select class="input" name="operator_id"><option value="">Todos</option></select></label>
+          <label>Jogo<select class="input" name="game_id"><option value="">Todos</option></select></label>
+          <label>Status<select class="input" name="status"><option value="">Todos</option></select></label>
+          <button class="btn" type="submit">Filtrar</button>
+        </form>
+        <div id="history-notice" class="notice" role="status"></div>
+        <div class="table-wrap">
+          <table class="history-table">
+            <thead><tr><th>Data</th><th>Início</th><th>Encerramento</th><th>Operador</th><th>Jogo</th><th>Simulador</th><th>Duração</th><th>Status</th><th>Motivo</th></tr></thead>
+            <tbody id="history-rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+  <script src="/assets/app.js"></script>
+  <script>
+    const names={waiting:'Aguardando',running:'Em andamento',completed:'Concluída',cancelled:'Cancelada',interrupted:'Interrompida',technical_failure:'Falha técnica'};
+    const formQuery=form=>{const query=new URLSearchParams(new FormData(form));for(const [key,value] of [...query])if(!value)query.delete(key);return query.toString()};
+    const dateTime=value=>value?new Date(value).toLocaleString('pt-BR'):'—';
+    const durationLabel=seconds=>{if(!seconds)return '0 s';const minutes=Math.floor(seconds/60),rest=seconds%60;return minutes?`${minutes} min ${rest?rest+' s':''}`:`${rest} s`};
+    let historyFiltersLoaded=false;
+
+    async function loadHistory(){
+      const query=formQuery(document.querySelector('#history-filters'));
+      const result=await api('/admin/history'+(query?'?'+query:''));
+      const metrics=result.summary;
+      document.querySelector('#history-total').textContent=metrics.total;
+      document.querySelector('#history-completed').textContent=metrics.completed;
+      document.querySelector('#history-cancelled').textContent=metrics.cancelled;
+      document.querySelector('#history-interrupted').textContent=metrics.interrupted;
+      document.querySelector('#history-failed').textContent=metrics.technical_failure;
+      document.querySelector('#history-time').textContent=durationLabel(metrics.effective_seconds);
+      if(!historyFiltersLoaded){
+        const operatorSelect=document.querySelector('[name="operator_id"]');
+        const gameSelect=document.querySelector('[name="game_id"]');
+        const statusSelect=document.querySelector('[name="status"]');
+        for(const item of result.filters.operators){const option=document.createElement('option');option.value=item.id;option.textContent=item.username;operatorSelect.append(option)}
+        for(const item of result.filters.games){const option=document.createElement('option');option.value=item.id;option.textContent=item.name;gameSelect.append(option)}
+        for(const value of result.filters.statuses){const option=document.createElement('option');option.value=value;option.textContent=names[value]||value;statusSelect.append(option)}
+        historyFiltersLoaded=true;
+      }
+      const body=document.querySelector('#history-rows');body.replaceChildren();
+      for(const item of result.items){
+        const row=document.createElement('tr');
+        const fields=[item.date||'—',dateTime(item.started_at),dateTime(item.ended_at),item.operator,item.game,item.simulator,
+          `${item.contracted_minutes} min / ${durationLabel(item.effective_seconds)}`,names[item.status]||item.status,item.reason||'—'];
+        for(const value of fields){const cell=document.createElement('td');cell.textContent=value;row.append(cell)}
+        body.append(row);
+      }
+      document.querySelector('#history-notice').textContent=`${result.items.length} sessão(ões) encontradas.`;
+    }
+
+    async function init(){
+      let user;try{user=await api('/auth/me')}catch(e){if(e.status===401)return;document.querySelector('#notice').textContent='Não foi possível validar a sessão: '+e.message;return}
+      if(user.role!=='admin'){document.querySelector('#notice').textContent='Acesso restrito a administradores.';return}
+      document.querySelector('#login').classList.add('hidden');document.querySelector('#dashboard').classList.remove('hidden');
+      try{
+        const summary=await api('/admin/summary');document.querySelector('#count').textContent=summary.sessions_total;
+        document.querySelector('#running').textContent=summary.by_status.running+summary.by_status.waiting;
+        document.querySelector('#failures').textContent=summary.by_status.technical_failure;
+        const list=document.querySelector('#statuses');
+        for(const [key,label] of Object.entries(names)){const row=document.createElement('div');row.className='status-row';const title=document.createElement('span');title.textContent=label;const value=document.createElement('b');value.textContent=summary.by_status[key];row.append(title,value);list.append(row)}
+        const durations=await api('/admin/session-durations');document.querySelector('[name=durations]').value=durations.durations.join(', ');
+        await loadHistory();
+      }catch(e){document.querySelector('#admin-notice').textContent='Não foi possível carregar a configuração: '+e.message}
+    }
+
+    document.querySelector('#create-user').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const values=new FormData(form);try{await api('/admin/users',{method:'POST',body:JSON.stringify({username:values.get('username'),password:values.get('password'),role:'operator'})});document.querySelector('#admin-notice').textContent='Operador criado.';form.reset()}catch(error){document.querySelector('#admin-notice').textContent=error.message}});
+    document.querySelector('#durations').addEventListener('submit',async event=>{event.preventDefault();try{const values=document.querySelector('[name="durations"]').value.split(',').map(value=>Number(value.trim()));const result=await api('/admin/session-durations',{method:'PUT',body:JSON.stringify({durations:values})});document.querySelector('[name="durations"]').value=result.durations.join(', ');document.querySelector('#duration-notice').textContent='Durações atualizadas.'}catch(error){document.querySelector('#duration-notice').textContent=error.message}});
+    document.querySelector('#history-filters').addEventListener('submit',async event=>{event.preventDefault();try{await loadHistory()}catch(error){document.querySelector('#history-notice').textContent=error.message}});
+    document.querySelector('#export-history').addEventListener('click',async()=>{try{const query=formQuery(document.querySelector('#history-filters'));const response=await fetch('/api/admin/history.csv'+(query?'?'+query:''),{credentials:'same-origin'});if(!response.ok)throw Error(`Erro ${response.status}`);const blob=await response.blob();const url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download='racing_manager_history.csv';link.click();URL.revokeObjectURL(url)}catch(error){document.querySelector('#history-notice').textContent='Falha ao exportar CSV: '+error.message}});
+    init();
+  </script>
+</body>
+</html>

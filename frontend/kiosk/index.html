@@ -1,7 +1,118 @@
-<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#070a0e"><title>Racing Manager | Kiosk</title><link rel="stylesheet" href="/assets/app.css"></head><body class="kiosk"><main class="kiosk-shell"><header class="kiosk-top"><div class="brand"><b>RM</b><span> RACING MANAGER</span></div><div class="eyebrow">SIMULATOR EXPERIENCE&nbsp; / &nbsp;01</div></header><section id="waiting" class="kiosk-view"><div class="kiosk-mark">RM<span> / CIRCUIT CONTROL</span></div><div class="eyebrow">SIMULADOR DE CORRIDA</div><h1 class="kiosk-title">A próxima volta<br><em>começa aqui.</em></h1><div id="waiting-message" class="kiosk-message">Aguarde o operador para começar.</div><div class="kiosk-bottom"><span id="kiosk-device">SIMULADOR 01 · AGUARDANDO</span><span>RACING MANAGER</span></div></section><section id="running" class="kiosk-view hidden"><div class="eyebrow">SESSÃO EM ANDAMENTO</div><div id="kiosk-timer" class="kiosk-timer">--:--</div><div id="kiosk-warning" class="kiosk-warning">BOA CORRIDA</div><p class="kiosk-session-label">IDENTIFICADOR DA SESSÃO</p><div id="kiosk-session-id" class="session-id"></div><div class="kiosk-bottom"><span>O TEMPO É CONTROLADO PELO SERVIDOR</span><span>RACING MANAGER</span></div></section></main><script>
-const waiting=document.querySelector('#waiting'),running=document.querySelector('#running');let socket;
-const fmt=s=>`${String(Math.floor(Math.max(0,s)/60)).padStart(2,'0')}:${String(Math.max(0,s)%60).padStart(2,'0')}`;
-function update(state){document.querySelector('#kiosk-device').textContent=`SIMULADOR 01 · ${(state.simulator_status||'WAITING').replaceAll('_',' ').toUpperCase()}`;const s=state.session;const isRunning=!!s&&s.status==='running';waiting.classList.toggle('hidden',isRunning);running.classList.toggle('hidden',!isRunning);if(isRunning){document.querySelector('#kiosk-timer').textContent=fmt(s.remaining_seconds);document.querySelector('#kiosk-timer').classList.toggle('urgent',s.remaining_seconds<=30);document.querySelector('#kiosk-warning').textContent=s.warning==='30_seconds'?'30 SEGUNDOS RESTANTES':s.warning==='2_minutes'?'2 MINUTOS RESTANTES':'BOA CORRIDA';document.querySelector('#kiosk-session-id').textContent=s.id.slice(0,8).toUpperCase()}else if(s?.status==='waiting'){document.querySelector('#waiting-message').textContent='Preparando o simulador. Aguarde um instante.'}else if(state.simulator_status==='unmanaged_game_running'){document.querySelector('#waiting-message').textContent='Simulador indisponível. Procure o operador.'}else{document.querySelector('#waiting-message').textContent='Aguarde o operador para começar.'}}
-async function connect(){try{const scheme=location.protocol==='https:'?'wss':'ws';socket=new WebSocket(`${scheme}://${location.host}/api/ws/kiosk`);socket.onmessage=e=>update(JSON.parse(e.data));socket.onclose=async()=>{try{update(await (await fetch('/api/kiosk/status')).json())}catch{}setTimeout(connect,2500)}}catch{setTimeout(connect,2500)}}
-fetch('/api/kiosk/status').then(r=>r.json()).then(update).catch(()=>{});connect();
-</script></body></html>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <meta name="theme-color" content="#070a0e">
+  <title>Racing Manager | Kiosk</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="kiosk">
+  <main class="kiosk-shell">
+    <header class="kiosk-top" id="kiosk-top">
+      <div class="brand"><b>RM</b><span> RACING MANAGER</span></div>
+      <div class="eyebrow">SIMULATOR EXPERIENCE&nbsp; / &nbsp;01</div>
+    </header>
+
+    <section id="screen-waiting" class="kiosk-state">
+      <div class="kiosk-mark">RM<span> / CIRCUIT CONTROL</span></div>
+      <div class="eyebrow">SIMULADOR DE CORRIDA</div>
+      <h1 class="kiosk-title">A próxima volta<br><em>começa aqui.</em></h1>
+      <p class="kiosk-message">Aguarde o operador para começar.</p>
+      <div class="kiosk-bottom"><span id="kiosk-device">SIMULADOR 01 · AGUARDANDO</span><span>RACING MANAGER</span></div>
+    </section>
+
+    <section id="screen-guidance" class="kiosk-state hidden" aria-live="polite">
+      <div class="eyebrow">ANTES DA CORRIDA</div>
+      <h1 class="kiosk-guidance-title">Prepare-se para a pista</h1>
+      <ul id="guidance-messages" class="kiosk-guidance-list"></ul>
+      <div id="guidance-countdown-wrap" class="kiosk-guidance-countdown">
+        <span>O SIMULADOR INICIA EM</span>
+        <strong id="guidance-countdown">15</strong>
+        <span>SEGUNDOS</span>
+      </div>
+      <p id="launching-message" class="kiosk-message hidden">Iniciando o simulador…</p>
+      <div class="kiosk-bottom"><span>RACING MANAGER</span><span>ASSETTO CORSA COMPETIZIONE</span></div>
+    </section>
+
+    <section id="screen-playing" class="kiosk-state hidden" aria-label="Sessão em andamento"></section>
+
+    <section id="screen-ending" class="kiosk-state hidden" aria-live="polite">
+      <div class="eyebrow">FIM DE SESSÃO</div>
+      <h1 class="kiosk-guidance-title">Sessão encerrada</h1>
+      <p class="kiosk-message">Obrigado por correr com a gente.</p>
+    </section>
+
+    <section id="screen-failure" class="kiosk-state hidden" aria-live="assertive">
+      <div class="eyebrow">SIMULADOR INDISPONÍVEL</div>
+      <h1 class="kiosk-guidance-title">Não foi possível iniciar o jogo.</h1>
+      <p class="kiosk-message">Procure o operador para receber ajuda.</p>
+    </section>
+  </main>
+
+  <script>
+    const screenIds = ['waiting', 'guidance', 'playing', 'ending', 'failure'];
+    let socket = null;
+    let lastGuidanceSession = null;
+
+    function setScreen(name) {
+      const selected = screenIds.includes(name) ? name : 'waiting';
+      for (const id of screenIds) {
+        document.querySelector(`#screen-${id}`).classList.toggle('hidden', id !== selected);
+      }
+      document.body.classList.toggle('kiosk-playing', selected === 'playing');
+    }
+
+    function update(state) {
+      const screen = state?.screen || 'waiting';
+      setScreen(screen);
+      const session = state?.session;
+      if (screen === 'guidance' && session) {
+        if (session.id !== lastGuidanceSession) {
+          lastGuidanceSession = session.id;
+          const list = document.querySelector('#guidance-messages');
+          list.replaceChildren(...(state.guidance_messages || []).map(message => {
+            const item = document.createElement('li');
+            item.textContent = message;
+            return item;
+          }));
+        }
+        const launching = session.phase === 'launching';
+        document.querySelector('#guidance-countdown-wrap').classList.toggle('hidden', launching);
+        document.querySelector('#launching-message').classList.toggle('hidden', !launching);
+        if (!launching && Number.isInteger(session.guidance_remaining_seconds)) {
+          document.querySelector('#guidance-countdown').textContent = session.guidance_remaining_seconds;
+        }
+      } else if (screen === 'waiting') {
+        lastGuidanceSession = null;
+        document.querySelector('#kiosk-device').textContent =
+          `SIMULADOR 01 · ${(state.simulator_status || 'WAITING').replaceAll('_', ' ').toUpperCase()}`;
+      }
+    }
+
+    async function pollOnce() {
+      const response = await fetch('/api/kiosk/status', { credentials: 'same-origin' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      update(await response.json());
+    }
+
+    function connect() {
+      try {
+        const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+        socket = new WebSocket(`${scheme}://${location.host}/api/ws/kiosk`);
+        socket.onmessage = event => update(JSON.parse(event.data));
+        socket.onclose = async () => {
+          try { await pollOnce(); } catch { /* mantém o último estado visível */ }
+          setTimeout(connect, 2500);
+        };
+        socket.onerror = () => socket.close();
+      } catch {
+        setTimeout(connect, 2500);
+      }
+    }
+
+    pollOnce().catch(() => {});
+    connect();
+  </script>
+</body>
+</html>

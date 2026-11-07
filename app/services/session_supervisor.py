@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -12,11 +13,14 @@ logger = logging.getLogger(__name__)
 
 class SessionSupervisor:
     def __init__(self, session_factory, steam, launch_timeout_seconds: int = 120,
-                 unresponsive_grace_seconds: int = 60):
+                 unresponsive_grace_seconds: int = 60, guidance_duration_seconds: int = 15,
+                 transition_lock=None):
         self.session_factory = session_factory
         self.steam = steam
         self.launch_timeout_seconds = launch_timeout_seconds
         self.unresponsive_grace_seconds = unresponsive_grace_seconds
+        self.guidance_duration_seconds = max(0, guidance_duration_seconds)
+        self.transition_lock = transition_lock or threading.RLock()
 
     async def run(self):
         while True:
@@ -27,6 +31,10 @@ class SessionSupervisor:
             await asyncio.sleep(1)
 
     def tick(self):
+        with self.transition_lock:
+            self._tick_locked()
+
+    def _tick_locked(self):
         now = datetime.now(timezone.utc)
         with self.session_factory() as db:
             sessions = db.scalars(select(RacingSession).where(
@@ -37,9 +45,27 @@ class SessionSupervisor:
                 simulator = db.get(Simulator, session.simulator_id)
                 processes = self.steam.find_game_processes()
                 if session.status == "waiting":
-                    created = session.created_at or now
-                    if created.tzinfo is None:
-                        created = created.replace(tzinfo=timezone.utc)
+                    if session.launch_requested_at is None:
+                        guidance_started = session.guidance_started_at or session.created_at or now
+                        if guidance_started.tzinfo is None:
+                            guidance_started = guidance_started.replace(tzinfo=timezone.utc)
+                        if processes:
+                            self._fail(db, session, now,
+                                "O ACC já estava em execução durante as orientações; a sessão não foi iniciada.",
+                                "session.game_running_before_launch")
+                        elif (now - guidance_started).total_seconds() >= self.guidance_duration_seconds:
+                            session.launch_requested_at = now
+                            db.commit()
+                            try:
+                                self.steam.launch_game()
+                                db.add(AuditLog(actor_id=session.operator_id, action="session.game_launch_requested",
+                                    details=f"session={session.public_id}"))
+                                db.commit()
+                            except Exception as exc:
+                                self._fail(db, session, datetime.now(timezone.utc),
+                                    f"Falha ao iniciar a Steam/o jogo: {exc}", "session.launch_failed")
+                                db.commit()
+                        continue
                     if processes:
                         session.started_at = now
                         session.status = "running"
@@ -47,8 +73,12 @@ class SessionSupervisor:
                             simulator.status = "game_running"
                         db.add(AuditLog(actor_id=session.operator_id, action="session.game_started",
                             details=f"session={session.public_id}"))
-                    elif (now - created).total_seconds() >= self.launch_timeout_seconds:
-                        self._fail(db, session, now, f"{ASSETTO_CORSA_COMPETIZIONE.name} não iniciou dentro do tempo limite.", "session.launch_timeout")
+                    else:
+                        launch_requested = session.launch_requested_at
+                        if launch_requested.tzinfo is None:
+                            launch_requested = launch_requested.replace(tzinfo=timezone.utc)
+                        if (now - launch_requested).total_seconds() >= self.launch_timeout_seconds:
+                            self._fail(db, session, now, f"{ASSETTO_CORSA_COMPETIZIONE.name} não iniciou dentro do tempo limite.", "session.launch_timeout")
                     continue
 
                 started = session.started_at or now
@@ -56,6 +86,8 @@ class SessionSupervisor:
                     started = started.replace(tzinfo=timezone.utc)
                 remaining = session.contracted_minutes * 60 - int((now - started).total_seconds())
                 if remaining <= 0:
+                    end_requested = started + timedelta(minutes=session.contracted_minutes)
+                    session.end_requested_at = end_requested
                     try:
                         self.steam.close_game()
                     except Exception as exc:
@@ -65,8 +97,8 @@ class SessionSupervisor:
                         self._fail(db, session, now, "O jogo permaneceu ativo após o encerramento controlado.", "session.shutdown_failed")
                     else:
                         session.status = "completed"
-                        session.ended_at = started.replace(microsecond=0) + timedelta(minutes=session.contracted_minutes)
-                        session.effective_seconds = session.contracted_minutes * 60
+                        session.ended_at = datetime.now(timezone.utc)
+                        session.effective_seconds = max(0, int((end_requested - started).total_seconds()))
                         db.add(AuditLog(actor_id=session.operator_id, action="session.completed_by_timer",
                             details=f"session={session.public_id}"))
                     if simulator:

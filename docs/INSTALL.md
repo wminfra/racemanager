@@ -165,3 +165,16 @@ A primeira inicializacao aplica uma migracao aditiva idempotente que acrescenta
 nulas. Ela nao recria tabelas nem remove registros existentes. Registros
 anteriores permanecem no historico; dados de operador/jogo/simulador ausentes
 sao identificados como removidos ou desconhecidos.
+
+
+## Interrupcao manual de sessao
+
+Quando o ACC estiver em andamento, o Operator apresenta o botao vermelho **INTERROMPER SESSAO**, separado do encerramento normal. A confirmacao exige um motivo; ao selecionar **Outro**, a observacao tambem e obrigatoria. Fechar/cancelar o dialogo nao altera a sessao.
+
+O endpoint autenticado aceita somente usuarios `operator` e `admin`. A API serializa a transicao com o supervisor e com o encerramento normal. A hora efetiva e a hora da solicitacao de interrupcao; o horario de encerramento registra a confirmacao de que o processo ACC sumiu. O tempo nao utilizado e a duracao contratada menos a duracao efetiva. O periodo de orientacoes nao entra no calculo. Uma repeticao apos sucesso e segura e nao solicita outro fechamento.
+
+O fechamento usa a identificacao existente do executavel ACC e primeiro solicita fechamento normal; depois a integracao espera o intervalo e, se necessario, encerra somente processos que validou pelo nome e caminho da instalacao do ACC. A Steam permanece aberta. O intervalo padrao e 8 segundos e pode ser alterado em `.env` com `RACING_INTERRUPTION_CLOSE_GRACE_SECONDS` (0 a 60 segundos). Se ainda houver processo ou nao for possivel verificar o encerramento, o historico registra falha tecnica e o Operator recebe uma mensagem. Nesse caso, o equipamento permanece indisponivel enquanto o processo ACC continuar presente; feche-o e atualize o Operator.
+
+Para validar com o ACC real, inicie a Steam manualmente, execute `Start-RacingManager.ps1`, inicie uma sessao pelo Operator e aguarde o jogo entrar em andamento. Clique em **INTERROMPER SESSAO**, escolha o motivo e confirme. Confira no Gerenciador de Tarefas que `AC2-Win64-Shipping.exe` encerrou e que a Steam continua aberta; no Operator o equipamento deve voltar a disponivel, o Kiosk deve voltar a espera e o overlay deve desaparecer. No Admin, confira operador, motivo, observacao, hora, duracao efetiva e tempo nao utilizado; exporte o CSV com o filtro de motivo. Esses passos sao um teste manual; os testes automatizados usam apenas um adaptador simulado e nao validam o ACC instalado.
+
+Na proxima inicializacao, a migracao aditiva acrescenta horario da interrupcao, operador responsavel, motivo e observacao como campos opcionais, preservando as linhas atuais do SQLite. Registros antigos continuam consultaveis; os campos novos ficam vazios nos registros anteriores.

@@ -71,12 +71,13 @@
           <label>Operador<select class="input" name="operator_id"><option value="">Todos</option></select></label>
           <label>Jogo<select class="input" name="game_id"><option value="">Todos</option></select></label>
           <label>Status<select class="input" name="status"><option value="">Todos</option></select></label>
+          <label>Motivo da interrup&ccedil;&atilde;o<select class="input" name="interruption_reason"><option value="">Todos</option></select></label>
           <button class="btn" type="submit">Filtrar</button>
         </form>
         <div id="history-notice" class="notice" role="status"></div>
         <div class="table-wrap">
           <table class="history-table">
-            <thead><tr><th>Data</th><th>Início</th><th>Encerramento</th><th>Operador</th><th>Jogo</th><th>Simulador</th><th>Duração</th><th>Status</th><th>Motivo</th></tr></thead>
+            <thead><tr><th>Data</th><th>Início</th><th>Encerramento</th><th>Interrompida em</th><th>Operador responsável</th><th>Jogo</th><th>Simulador</th><th>Contratada</th><th>Efetiva</th><th>Não utilizada</th><th>Status</th><th>Motivo / observação</th></tr></thead>
             <tbody id="history-rows"></tbody>
           </table>
         </div>
@@ -105,17 +106,20 @@
         const operatorSelect=document.querySelector('[name="operator_id"]');
         const gameSelect=document.querySelector('[name="game_id"]');
         const statusSelect=document.querySelector('[name="status"]');
+        const interruptionSelect=document.querySelector('[name="interruption_reason"]');
         for(const item of result.filters.operators){const option=document.createElement('option');option.value=item.id;option.textContent=item.username;operatorSelect.append(option)}
         for(const item of result.filters.games){const option=document.createElement('option');option.value=item.id;option.textContent=item.name;gameSelect.append(option)}
         for(const value of result.filters.statuses){const option=document.createElement('option');option.value=value;option.textContent=names[value]||value;statusSelect.append(option)}
+        for(const value of result.filters.interruption_reasons){const option=document.createElement('option');option.value=value;option.textContent=value;interruptionSelect.append(option)}
         historyFiltersLoaded=true;
       }
       const body=document.querySelector('#history-rows');body.replaceChildren();
       for(const item of result.items){
         const row=document.createElement('tr');
-        const fields=[item.date||'—',dateTime(item.started_at),dateTime(item.ended_at),item.operator,item.game,item.simulator,
-          `${item.contracted_minutes} min / ${durationLabel(item.effective_seconds)}`,names[item.status]||item.status,item.reason||'—'];
-        for(const value of fields){const cell=document.createElement('td');cell.textContent=value;row.append(cell)}
+        const detail=[item.interruption_reason,item.interruption_note].filter(Boolean).join(' / ')||item.reason||'\u2014';
+        const fields=[item.date||'\u2014',dateTime(item.started_at),dateTime(item.ended_at),dateTime(item.interrupted_at),item.operator,item.game,item.simulator,
+          `${item.contracted_minutes} min`,durationLabel(item.effective_seconds),durationLabel(item.unused_seconds),names[item.status]||item.status,detail];
+        for(const [index,value] of fields.entries()){const cell=document.createElement('td');cell.textContent=value;if(index===10&&item.status==='interrupted')cell.className='history-status-interrupted';row.append(cell)}
         body.append(row);
       }
       document.querySelector('#history-notice').textContent=`${result.items.length} sessão(ões) encontradas.`;

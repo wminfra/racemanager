@@ -22,6 +22,8 @@ class FakeSteam:
         self.auto_start = True
         self.launch_calls = 0
         self.close_calls = 0
+        self.close_error = None
+        self.leave_running_on_close = False
 
     def inspect(self):
         return {"ready": self.ready, "steam_installed": self.ready, "game_installed": self.ready,
@@ -42,7 +44,10 @@ class FakeSteam:
 
     def close_game(self, grace_seconds=8):
         self.close_calls += 1
-        self.running = False
+        if self.close_error:
+            raise RuntimeError(self.close_error)
+        if not self.leave_running_on_close:
+            self.running = False
 
     def is_game_unresponsive(self, processes=None):
         return self.unresponsive and self.running

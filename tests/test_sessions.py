@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func, select
 
@@ -167,6 +168,123 @@ def test_operator_can_end_a_running_session_through_controlled_adapter(client, d
     assert client.steam.close_calls == 1
 
 
+def running_session(client, db_session):
+    response = create_session(client, db_session)
+    row = db_session.scalar(select(RacingSession).where(RacingSession.public_id == response.json()["id"]))
+    row.started_at = datetime.now(timezone.utc) - timedelta(seconds=75)
+    db_session.commit()
+    return response.json()["id"], row
+
+
+def test_operator_can_interrupt_and_free_simulator_with_exact_duration(client, db_session):
+    session_id, row = running_session(client, db_session)
+    result = client.post(f"/api/sessions/{session_id}/interrupt", json={"reason": "Problema no volante"})
+    assert result.status_code == 200
+    db_session.refresh(row)
+    assert row.status == "interrupted"
+    assert row.interrupted_at is not None
+    assert row.interrupted_by == row.operator_id
+    assert row.interruption_reason == "Problema no volante"
+    assert row.effective_seconds == int((row.interrupted_at - row.started_at).total_seconds())
+    assert row.ended_at >= row.interrupted_at
+    assert client.steam.close_calls == 1 and not client.steam.running
+    assert client.get("/api/operator/status").json()["available"] is True
+    assert client.get("/api/kiosk/status").json()["screen"] == "waiting"
+    assert db_session.scalar(select(Simulator).where(Simulator.id == row.simulator_id)).status == "ready"
+
+
+def test_interruption_other_requires_and_records_observation(client, db_session):
+    session_id, row = running_session(client, db_session)
+    missing = client.post(f"/api/sessions/{session_id}/interrupt", json={"reason": "Outro"})
+    assert missing.status_code == 422
+    result = client.post(f"/api/sessions/{session_id}/interrupt", json={
+        "reason": "Outro", "observation": "Cliente solicitou parada imediata",
+    })
+    assert result.status_code == 200
+    db_session.refresh(row)
+    assert row.interruption_note == "Cliente solicitou parada imediata"
+
+
+def test_interruption_without_active_session_and_kiosk_requests_are_rejected(client, db_session):
+    anonymous = client.post("/api/sessions/unknown/interrupt", json={"reason": "Problema no jogo"})
+    assert anonymous.status_code == 401
+    operator_login(client, db_session)
+    missing = client.post("/api/sessions/unknown/interrupt", json={"reason": "Problema no jogo"})
+    assert missing.status_code == 404
+    waiting = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1})
+    rejected = client.post(f"/api/sessions/{waiting.json()['id']}/interrupt", json={"reason": "Problema no jogo"})
+    assert rejected.status_code == 409
+
+
+def test_user_without_operator_or_admin_role_cannot_interrupt(client, db_session):
+    user = User(username="viewer", password_hash=hash_password("long-enough-password"), role="viewer")
+    db_session.add(user); db_session.commit()
+    client.post("/api/auth/login", json={"username": "viewer", "password": "long-enough-password"})
+    assert client.post("/api/sessions/missing/interrupt", json={"reason": "Problema no jogo"}).status_code == 403
+
+
+def test_simultaneous_interruption_requests_close_game_only_once(client, db_session):
+    session_id, row = running_session(client, db_session)
+    original_close = client.steam.close_game
+    def delayed_close(grace_seconds=8):
+        import time
+        time.sleep(0.15)
+        original_close(grace_seconds)
+    client.steam.close_game = delayed_close
+    payload = {"reason": "Solicitação do cliente"}
+    from app.core.config import settings
+    session_cookie = client.cookies.get(settings.session_cookie)
+    from fastapi.testclient import TestClient
+    second_client = TestClient(client.app)
+    second_client.cookies.set(settings.session_cookie, session_cookie, domain="testserver.local", path="/")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        requests = (client, second_client)
+        responses = list(pool.map(lambda test_client: test_client.post(
+            f"/api/sessions/{session_id}/interrupt", json=payload), requests))
+    assert [response.status_code for response in responses] == [200, 200]
+    db_session.refresh(row)
+    assert row.status == "interrupted"
+    assert client.steam.close_calls == 1
+
+
+def test_manual_interrupt_fails_if_acc_remains_running_and_records_technical_failure(client, db_session):
+    session_id, row = running_session(client, db_session)
+    client.steam.leave_running_on_close = True
+    result = client.post(f"/api/sessions/{session_id}/interrupt", json={"reason": "Problema no jogo"})
+    assert result.status_code == 503
+    db_session.refresh(row)
+    assert row.status == "technical_failure"
+    assert row.interruption_reason == "Problema no jogo"
+    assert "não foi possível confirmar" in row.failure_reason
+    assert client.get("/api/kiosk/status").json()["screen"] == "failure"
+
+
+def test_acc_already_closed_manually_still_records_interruption(client, db_session):
+    session_id, row = running_session(client, db_session)
+    client.steam.running = False
+    result = client.post(f"/api/sessions/{session_id}/interrupt", json={"reason": "Necessidade operacional"})
+    assert result.status_code == 200
+    db_session.refresh(row)
+    assert row.status == "interrupted"
+    assert client.steam.close_calls == 1
+
+
+def test_interruption_is_idempotent_and_natural_end_wins(client, db_session):
+    session_id, row = running_session(client, db_session)
+    row.started_at = datetime.now(timezone.utc) - timedelta(minutes=row.contracted_minutes, seconds=1)
+    db_session.commit()
+    late = client.post(f"/api/sessions/{session_id}/interrupt", json={"reason": "Problema no jogo"})
+    assert late.status_code == 409
+    assert row.status == "running"
+    # Once the timer/supervisor has committed a terminal state, a stale click cannot change it.
+    row.started_at = datetime.now(timezone.utc) - timedelta(seconds=60)
+    db_session.commit()
+    first = client.post(f"/api/sessions/{session_id}/interrupt", json={"reason": "Problema no jogo"})
+    retry = client.post(f"/api/sessions/{session_id}/interrupt", json={"reason": "Outro", "observation": "duplicado"})
+    assert first.status_code == retry.status_code == 200
+    assert client.steam.close_calls == 1
+
+
 def test_timer_completes_once_and_closes_only_the_adapter_process(client, db_session):
     response = create_session(client, db_session)
     row = db_session.scalar(select(RacingSession))
@@ -259,6 +377,25 @@ def test_restart_marks_open_session_interrupted_and_does_not_resume(client, db_s
     rows = db_session.scalars(select(RacingSession).order_by(RacingSession.public_id)).all()
     assert [row.status for row in rows] == ["interrupted", "technical_failure"]
     assert client.steam.running is False
+
+
+def test_restart_recovers_pending_operator_interruption_without_counting_shutdown_delay(client, db_session):
+    operator_login(client, db_session)
+    started = datetime.now(timezone.utc) - timedelta(seconds=90)
+    requested = datetime.now(timezone.utc) - timedelta(seconds=30)
+    row = RacingSession(public_id="recover-manual-interrupt", simulator_id=1, game_id=1,
+        operator_id=1, status="running", started_at=started, interrupted_at=requested,
+        interrupted_by=1, interruption_reason="Problema no volante",
+        interruption_note="Falha no centro", contracted_minutes=15)
+    db_session.add(row); db_session.commit()
+    client.steam.running = True
+    assert recover_open_sessions(db_session, client.steam) == 1
+    db_session.refresh(row)
+    assert row.status == "interrupted"
+    assert row.interruption_reason == "Problema no volante"
+    assert row.interruption_note == "Falha no centro"
+    assert row.effective_seconds == 60
+    assert row.failure_reason is None
 
 
 def test_legacy_session_migration_preserves_history_without_money_and_is_idempotent(client, db_session):

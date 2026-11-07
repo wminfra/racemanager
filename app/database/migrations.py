@@ -62,6 +62,10 @@ def migrate_session_operational_columns(db: Session) -> list[str]:
         "guidance_started_at": "DATETIME",
         "launch_requested_at": "DATETIME",
         "end_requested_at": "DATETIME",
+        "interrupted_at": "DATETIME",
+        "interrupted_by": "INTEGER REFERENCES users(id)",
+        "interruption_reason": "VARCHAR(80)",
+        "interruption_note": "TEXT",
     }
     added = []
     with bind.begin() as connection:
@@ -89,6 +93,8 @@ def recover_open_sessions(db: Session, steam) -> int:
     if should_close_game:
         try:
             steam.close_game()
+            if steam.find_game_processes():
+                close_failed = True
         except Exception:
             close_failed = True
     now = datetime.now(timezone.utc)
@@ -97,9 +103,20 @@ def recover_open_sessions(db: Session, steam) -> int:
             started = session.started_at
             if started.tzinfo is None:
                 started = started.replace(tzinfo=timezone.utc)
-            session.effective_seconds = max(0, int((now - started).total_seconds()))
-            session.status = "interrupted"
-            session.failure_reason = "Computador ou serviço reiniciado durante a sessão."
+            if session.interrupted_at:
+                interrupted_at = session.interrupted_at
+                if interrupted_at.tzinfo is None:
+                    interrupted_at = interrupted_at.replace(tzinfo=timezone.utc)
+                session.effective_seconds = max(0, int((interrupted_at - started).total_seconds()))
+                session.status = "technical_failure" if close_failed else "interrupted"
+                session.failure_reason = (
+                    "Falha t\u00e9cnica ao confirmar o encerramento do ACC ap\u00f3s rein\u00edcio do servi\u00e7o."
+                    if close_failed else None
+                )
+            else:
+                session.effective_seconds = max(0, int((now - started).total_seconds()))
+                session.status = "interrupted"
+                session.failure_reason = "Computador ou servi\u00e7o reiniciado durante a sess\u00e3o."
         else:
             session.status = "technical_failure"
             session.failure_reason = "Serviço reiniciado antes de confirmar o início do jogo."

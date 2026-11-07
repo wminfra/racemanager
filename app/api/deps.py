@@ -17,3 +17,9 @@ def admin_user(user: User = Depends(current_user)) -> User:
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="Acesso restrito a administradores")
     return user
+
+
+def operator_or_admin(user: User = Depends(current_user)) -> User:
+    if user.role not in {"admin", "operator"}:
+        raise HTTPException(status_code=403, detail="Acesso restrito a operadores e administradores")
+    return user

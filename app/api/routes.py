@@ -8,17 +8,18 @@ from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import admin_user, current_user
+from app.api.deps import admin_user, current_user, operator_or_admin
 from app.core.config import settings
 from app.database.session import get_db
 from app.models import AppSetting, AuditLog, Game, RacingSession, Simulator, User
 from app.schemas.auth import LoginRequest, UserCreate
-from app.schemas.session import SessionCreate, SessionDurationsUpdate
+from app.schemas.session import SessionCreate, SessionDurationsUpdate, SessionInterrupt
 from app.services.audit import record
 from app.services.auth import hash_password, verify_password
-from app.services.history import HISTORY_STATUSES, read_history
+from app.services.history import HISTORY_STATUSES, INTERRUPTION_REASONS, read_history
 from app.services.sessions import (begin_session, cancel_waiting_session, configured_durations,
-                                   end_running_session, public_kiosk_state, session_view)
+                                   end_running_session, interrupt_running_session,
+                                   public_kiosk_state, session_view, SessionClosureError)
 
 router = APIRouter()
 _login_attempts: dict[str, list[float]] = {}
@@ -163,6 +164,24 @@ def finish_session(public_id: str, request: Request,
         raise HTTPException(409, str(exc)) from exc
 
 
+@router.post("/sessions/{public_id}/interrupt")
+def interrupt_session(public_id: str, payload: SessionInterrupt, request: Request,
+                      db: Session = Depends(get_db), user: User = Depends(operator_or_admin)):
+    try:
+        with request.app.state.session_transition_lock:
+            session = interrupt_running_session(db, public_id, user, request.app.state.steam,
+                                                payload.reason, payload.observation)
+        return session_view(session)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except SessionClosureError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("/admin/users", status_code=201)
 def create_user(payload: UserCreate, db: Session = Depends(get_db), admin: User = Depends(admin_user)):
     if payload.role != "operator":
@@ -188,39 +207,49 @@ def admin_summary(db: Session = Depends(get_db), admin: User = Depends(admin_use
 
 def _admin_history_data(date_from: date | None, date_to: date | None,
                         operator_id: int | None, game_id: int | None, status: str | None,
+                        interruption_reason: str | None,
                         db: Session):
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, "A data inicial deve ser anterior ou igual à data final.")
     if status and status not in HISTORY_STATUSES:
         raise HTTPException(422, "Status de sessão inválido.")
-    return read_history(db, date_from, date_to, operator_id, game_id, status)
+    if interruption_reason and interruption_reason not in INTERRUPTION_REASONS:
+        raise HTTPException(422, "Motivo de interrupção inválido.")
+    return read_history(db, date_from, date_to, operator_id, game_id, status, interruption_reason)
 
 
 @router.get("/admin/history")
 def admin_history(date_from: date | None = None, date_to: date | None = None,
                   operator_id: int | None = Query(default=None, gt=0),
                   game_id: int | None = Query(default=None, gt=0), status: str | None = None,
+                  interruption_reason: str | None = None,
                   db: Session = Depends(get_db), admin: User = Depends(admin_user)):
-    return _admin_history_data(date_from, date_to, operator_id, game_id, status, db)
+    return _admin_history_data(date_from, date_to, operator_id, game_id, status,
+                               interruption_reason, db)
 
 
 @router.get("/admin/history.csv")
 def export_admin_history(date_from: date | None = None, date_to: date | None = None,
                          operator_id: int | None = Query(default=None, gt=0),
                          game_id: int | None = Query(default=None, gt=0), status: str | None = None,
+                         interruption_reason: str | None = None,
                          db: Session = Depends(get_db), admin: User = Depends(admin_user)):
-    result = _admin_history_data(date_from, date_to, operator_id, game_id, status, db)
+    result = _admin_history_data(date_from, date_to, operator_id, game_id, status,
+                                 interruption_reason, db)
     output = io.StringIO(newline="")
     writer = csv.writer(output, lineterminator="\r\n")
     writer.writerow(("ID", "Sessão", "Data", "Solicitada em", "Orientações iniciadas em",
                      "Jogo solicitado em", "Início da utilização", "Encerramento solicitado em",
                      "Encerrada em", "Operador", "Jogo", "Simulador", "Duração contratada (min)",
-                     "Duração efetiva (s)", "Status", "Motivo"))
+                     "Duração efetiva (s)", "Tempo não utilizado (s)", "Interrompida em",
+                     "Operador responsável", "Motivo da interrupção", "Observação", "Status", "Detalhe"))
     for item in result["items"]:
         writer.writerow((item["id"], item["session_id"], item["date"], item["requested_at"],
                          item["guidance_started_at"], item["launch_requested_at"], item["started_at"],
                          item["end_requested_at"], item["ended_at"], item["operator"], item["game"],
                          item["simulator"], item["contracted_minutes"], item["effective_seconds"],
+                         item["unused_seconds"], item["interrupted_at"], item["operator"],
+                         item["interruption_reason"] or "", item["interruption_note"] or "",
                          item["status"], item["reason"] or ""))
     return Response("\ufeff" + output.getvalue(), media_type="text/csv",
                     headers={"Content-Disposition": "attachment; filename=racing_manager_history.csv"})

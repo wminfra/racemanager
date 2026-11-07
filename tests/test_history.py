@@ -36,6 +36,8 @@ def seed_history(db_session):
         RacingSession(public_id="hist-interrupted", simulator_id=1, game_id=game.id, operator_id=operator.id,
             status="interrupted", created_at=datetime(2026, 11, 3, 12, tzinfo=timezone.utc),
             started_at=datetime(2026, 11, 3, 12, tzinfo=timezone.utc),
+            interrupted_at=datetime(2026, 11, 3, 12, 1, tzinfo=timezone.utc), interrupted_by=operator.id,
+            interruption_reason="Problema no volante", interruption_note="Volante perdeu o centro",
             ended_at=datetime(2026, 11, 3, 12, 1, tzinfo=timezone.utc),
             contracted_minutes=15, effective_seconds=60, failure_reason="Jogo fechado inesperadamente."),
         RacingSession(public_id="hist-failed", simulator_id=1, game_id=game.id, operator_id=operator.id,
@@ -67,6 +69,10 @@ def test_admin_history_records_all_terminal_states_and_effective_play_time(clien
     failed = next(item for item in data["items"] if item["session_id"] == "hist-failed")
     assert failed["started_at"] is None
     assert failed["effective_seconds"] == 0
+    interrupted = next(item for item in data["items"] if item["session_id"] == "hist-interrupted")
+    assert interrupted["interruption_reason"] == "Problema no volante"
+    assert interrupted["interruption_note"] == "Volante perdeu o centro"
+    assert interrupted["unused_seconds"] == 15 * 60 - 60
     assert "finance" not in str(data).lower()
 
 
@@ -91,6 +97,13 @@ def test_admin_history_filters_and_csv_export_share_the_selected_filters(client,
     assert table[0][0:3] == ["ID", "Sessão", "Data"]
     assert any(row[1] == "hist-completed" and row[13] == "900" for row in table[1:])
     assert all("finance" not in cell.lower() and "valor" not in cell.lower() for row in table for cell in row)
+
+    filtered = client.get("/api/admin/history", params={"interruption_reason": "Problema no volante"})
+    assert filtered.status_code == 200
+    assert [item["session_id"] for item in filtered.json()["items"]] == ["hist-interrupted"]
+    interrupt_csv = client.get("/api/admin/history.csv", params={"interruption_reason": "Problema no volante"})
+    assert interrupt_csv.status_code == 200
+    assert "Problema no volante" in interrupt_csv.content.decode("utf-8-sig")
 
 
 def test_history_endpoints_remain_admin_only(client, db_session):

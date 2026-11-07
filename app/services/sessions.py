@@ -19,6 +19,17 @@ GUIDANCE_MESSAGES = (
 logger = logging.getLogger(__name__)
 
 
+class SessionClosureError(RuntimeError):
+    """The interruption was recorded, but ACC could not be confirmed closed."""
+
+
+INTERRUPTION_REASONS = (
+    "Problema no volante", "Problema nos pedais", "Problema no câmbio",
+    "Problema no computador", "Problema no jogo", "Solicitação do cliente",
+    "Necessidade operacional", "Outro",
+)
+
+
 def configured_durations(db: Session, include_test_durations: bool = False) -> list[int]:
     setting = db.get(AppSetting, "session_durations_minutes")
     if not setting:
@@ -79,6 +90,10 @@ def session_view(session: RacingSession) -> dict:
         "launch_requested_at": session.launch_requested_at.isoformat() if session.launch_requested_at else None,
         "started_at": started.isoformat() if started else None,
         "end_requested_at": session.end_requested_at.isoformat() if session.end_requested_at else None,
+        "interrupted_at": session.interrupted_at.isoformat() if session.interrupted_at else None,
+        "interrupted_by": session.interrupted_by,
+        "interruption_reason": session.interruption_reason,
+        "interruption_note": session.interruption_note,
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,
         "contracted_minutes": session.contracted_minutes,
         "effective_seconds": session.effective_seconds,
@@ -115,6 +130,8 @@ def public_kiosk_state(db: Session) -> dict:
         age = (now - ended).total_seconds()
         display_for = (settings.session_end_display_seconds if terminal.status == "completed"
                        else settings.session_failure_display_seconds)
+        if terminal.status == "interrupted" and terminal.interrupted_at:
+            return {"screen": "waiting", "session": None, "guidance_messages": []}
         if 0 <= age <= display_for:
             screen = "ending" if terminal.status == "completed" else "failure"
             return {"screen": screen, "session": {
@@ -220,5 +237,87 @@ def end_running_session(db: Session, public_id: str, user: User, steam) -> Racin
     session.effective_seconds = max(0, int((end_requested - started).total_seconds()))
     session.status = "completed"
     _audit(db, user.id, "session.ended_by_operator", session)
+    db.commit()
+    return session
+
+
+def interrupt_running_session(db: Session, public_id: str, user: User, steam,
+                              reason: str, observation: str | None = None) -> RacingSession:
+    session = db.scalar(select(RacingSession).where(RacingSession.public_id == public_id))
+    if not session:
+        raise LookupError("Sessão não encontrada.")
+    # A retry after a successful response is safe and never closes the game twice.
+    if session.status == "interrupted" and session.interrupted_at:
+        return session
+    if session.status == "technical_failure" and session.interrupted_at:
+        raise SessionClosureError(session.failure_reason or "Não foi possível confirmar o encerramento do jogo.")
+    if session.status != "running":
+        raise RuntimeError("A sessão não está em andamento; ela pode ter terminado ou já estar sendo encerrada.")
+    if reason not in INTERRUPTION_REASONS:
+        raise ValueError("Motivo de interrupção inválido.")
+    note = (observation or "").strip() or None
+    if reason == "Outro" and not note:
+        raise ValueError("Informe uma observação para o motivo Outro.")
+    if reason != "Outro" and note:
+        raise ValueError("A observação só pode ser preenchida para o motivo Outro.")
+    if not session.started_at:
+        raise RuntimeError("Não há horário confirmado de início para calcular a duração efetiva.")
+
+    started = session.started_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    requested_at = datetime.now(timezone.utc)
+    contracted_end = started + timedelta(minutes=session.contracted_minutes)
+    if requested_at >= contracted_end:
+        raise RuntimeError("O tempo contratado terminou; aguarde o encerramento normal da sessão.")
+
+    session.end_requested_at = requested_at
+    session.interrupted_at = requested_at
+    session.interrupted_by = user.id
+    session.interruption_reason = reason
+    session.interruption_note = note
+    session.effective_seconds = max(0, int((requested_at - started).total_seconds()))
+    db.add(AuditLog(actor_id=user.id, action="session.interruption_requested",
+        details=f"session={session.public_id} reason={reason}" + (f" observation={note}" if note else "")))
+    # Persist intent first so a backend restart can recover this exact operation.
+    db.commit()
+
+    close_error = None
+    try:
+        steam.close_game(grace_seconds=settings.interruption_close_grace_seconds)
+    except Exception as exc:
+        close_error = exc
+        logger.exception("ACC close request failed for interrupted session %s", session.public_id)
+    try:
+        remaining_processes = steam.find_game_processes()
+    except Exception as exc:
+        remaining_processes = [object()]
+        close_error = close_error or exc
+        logger.exception("Could not verify ACC process after interruption for session %s", session.public_id)
+
+    simulator = db.get(Simulator, session.simulator_id)
+    if remaining_processes:
+        session.status = "technical_failure"
+        session.ended_at = datetime.now(timezone.utc)
+        session.failure_reason = "Falha técnica: não foi possível confirmar o encerramento do Assetto Corsa Competizione. Verifique o computador do simulador."
+        if simulator:
+            simulator.status = "game_running"
+        logger.error("ACC remained active after operator interruption for session %s", session.public_id)
+        db.add(AuditLog(actor_id=user.id, action="session.interruption_failed",
+            details=f"session={session.public_id} reason={reason}"))
+        db.commit()
+        raise SessionClosureError(session.failure_reason) from close_error
+
+    session.status = "interrupted"
+    session.ended_at = datetime.now(timezone.utc)
+    session.failure_reason = None
+    if simulator:
+        simulator.status = "ready"
+    detail = f"session={session.public_id} reason={reason} effective_seconds={session.effective_seconds}"
+    if note:
+        detail += f" observation={note}"
+    if close_error:
+        detail += " close_request_warning=process_absent_after_verification"
+    db.add(AuditLog(actor_id=user.id, action="session.interrupted_by_operator", details=detail[:2000]))
     db.commit()
     return session

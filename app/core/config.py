@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -17,6 +18,7 @@ class Settings(BaseSettings):
     guidance_duration_seconds: int = 15
     session_end_display_seconds: int = 4
     session_failure_display_seconds: int = 8
+    interruption_close_grace_seconds: int = Field(default=8, ge=0, le=60)
     overlay_backend_url: str = "http://127.0.0.1:8000"
 
 

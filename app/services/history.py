@@ -1,17 +1,26 @@
 from datetime import date
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Session
 
 from app.models import Game, RacingSession, Simulator, User
 
 HISTORY_STATUSES = ("waiting", "running", "completed", "cancelled", "interrupted", "technical_failure")
+INTERRUPTION_REASONS = (
+    "Problema no volante", "Problema nos pedais", "Problema no câmbio",
+    "Problema no computador", "Problema no jogo", "Solicitação do cliente",
+    "Necessidade operacional", "Outro",
+)
 
 
 def _query(db: Session, date_from: date | None, date_to: date | None,
            operator_id: int | None, game_id: int | None, status: str | None):
-    query = (select(RacingSession, User.username, Game.name, Simulator.name)
+    interrupting_operator = aliased(User)
+    responsible_operator = func.coalesce(interrupting_operator.username, User.username)
+    query = (select(RacingSession, responsible_operator, Game.name, Simulator.name)
              .outerjoin(User, User.id == RacingSession.operator_id)
+             .outerjoin(interrupting_operator, interrupting_operator.id == RacingSession.interrupted_by)
              .outerjoin(Game, Game.id == RacingSession.game_id)
              .outerjoin(Simulator, Simulator.id == RacingSession.simulator_id))
     session_day = func.date(func.coalesce(RacingSession.started_at, RacingSession.created_at))
@@ -20,7 +29,7 @@ def _query(db: Session, date_from: date | None, date_to: date | None,
     if date_to:
         query = query.where(session_day <= date_to.isoformat())
     if operator_id:
-        query = query.where(RacingSession.operator_id == operator_id)
+        query = query.where(func.coalesce(RacingSession.interrupted_by, RacingSession.operator_id) == operator_id)
     if game_id:
         query = query.where(RacingSession.game_id == game_id)
     if status:
@@ -36,7 +45,7 @@ def _record(session: RacingSession, operator_name: str | None,
             game_name: str | None, simulator_name: str | None) -> dict:
     event_date = session.started_at or session.created_at
     effective = session.effective_seconds if session.started_at else 0
-    reason = session.failure_reason
+    reason = session.interruption_reason or session.failure_reason
     if session.status == "cancelled" and not reason:
         reason = "Motivo não registrado em versão anterior."
     return {
@@ -48,12 +57,16 @@ def _record(session: RacingSession, operator_name: str | None,
         "launch_requested_at": _iso(session.launch_requested_at),
         "started_at": _iso(session.started_at),
         "end_requested_at": _iso(session.end_requested_at),
+        "interrupted_at": _iso(session.interrupted_at),
+        "interruption_reason": session.interruption_reason,
+        "interruption_note": session.interruption_note,
         "ended_at": _iso(session.ended_at),
         "game": game_name or "Jogo removido",
         "simulator": simulator_name or "Simulador removido",
         "operator": operator_name or "Operador não identificado",
         "contracted_minutes": session.contracted_minutes,
         "effective_seconds": effective or 0,
+        "unused_seconds": max(0, session.contracted_minutes * 60 - (effective or 0)),
         "status": session.status,
         "reason": reason,
     }
@@ -61,9 +74,12 @@ def _record(session: RacingSession, operator_name: str | None,
 
 def read_history(db: Session, date_from: date | None = None, date_to: date | None = None,
                  operator_id: int | None = None, game_id: int | None = None,
-                 status: str | None = None) -> dict:
+                 status: str | None = None, interruption_reason: str | None = None) -> dict:
+    query = _query(db, date_from, date_to, operator_id, game_id, status)
+    if interruption_reason:
+        query = query.where(RacingSession.interruption_reason == interruption_reason)
     records = [_record(*row) for row in db.execute(
-        _query(db, date_from, date_to, operator_id, game_id, status)).all()]
+        query).all()]
     summary = {
         "total": len(records),
         "completed": sum(item["status"] == "completed" for item in records),
@@ -72,7 +88,7 @@ def read_history(db: Session, date_from: date | None = None, date_to: date | Non
         "technical_failure": sum(item["status"] == "technical_failure" for item in records),
         "effective_seconds": sum(item["effective_seconds"] for item in records),
     }
-    operators = db.scalars(select(User).where(User.role == "operator").order_by(User.username)).all()
+    operators = db.scalars(select(User).where(User.role.in_(("admin", "operator"))).order_by(User.username)).all()
     games = db.scalars(select(Game).order_by(Game.name)).all()
     return {
         "summary": summary,
@@ -81,5 +97,6 @@ def read_history(db: Session, date_from: date | None = None, date_to: date | Non
             "operators": [{"id": item.id, "username": item.username} for item in operators],
             "games": [{"id": item.id, "name": item.name} for item in games],
             "statuses": list(HISTORY_STATUSES),
+            "interruption_reasons": list(INTERRUPTION_REASONS),
         },
     }

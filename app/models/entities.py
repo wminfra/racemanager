@@ -54,6 +54,7 @@ class RacingSession(Base):
     game_id: Mapped[int] = mapped_column(ForeignKey("games.id"))
     operator_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     status: Mapped[str] = mapped_column(String(30), default="waiting", index=True)
+    launch_mode: Mapped[str] = mapped_column(String(32), default="monitor", server_default="monitor")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     guidance_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     launch_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

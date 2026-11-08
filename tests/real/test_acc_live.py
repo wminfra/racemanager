@@ -48,7 +48,7 @@ def test_real_acc_starts_runs_for_two_minutes_and_closes(tmp_path):
             assert response.status_code == 200
             durations = client.get("/api/sessions/durations").json()["durations"]
             assert 1 in durations and 2 in durations
-            started = client.post("/api/sessions", json={"duration_minutes": 2, "simulator_id": 1, "game_id": 1})
+            started = client.post("/api/sessions", json={"duration_minutes": 2, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor"})
             assert started.status_code == 201, started.text
             launched_by_test = True
             public_id = started.json()["id"]
@@ -71,12 +71,19 @@ def test_real_acc_starts_runs_for_two_minutes_and_closes(tmp_path):
             assert final_session and final_session["status"] == "completed", final_session
             assert final_session["effective_seconds"] == 120
             assert steam.find_game_processes() == []
+            assert steam.inspect()["steam_running"] is True, "O encerramento do ACC nao pode encerrar a Steam."
+            # The Kiosk intentionally keeps its end screen visible briefly after
+            # the backend has completed the session and closed the game.
             kiosk = client.get("/api/kiosk/status").json()
+            kiosk_deadline = time.monotonic() + settings.session_end_display_seconds + 3
+            while kiosk["session"] is not None and time.monotonic() < kiosk_deadline:
+                time.sleep(0.25)
+                kiosk = client.get("/api/kiosk/status").json()
             assert kiosk["session"] is None
     finally:
         try:
             if launched_by_test and steam.find_game_processes():
-                steam.close_game(grace_seconds=2)
+                steam.close_game(origin="real_integration_cleanup", retry=True)
         finally:
             app.state.engine, app.state.session_factory, app.state.steam = previous
             settings.short_session_test_mode = previous_short_test_mode

@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     session_end_display_seconds: int = 4
     session_failure_display_seconds: int = 8
     interruption_close_grace_seconds: int = Field(default=8, ge=0, le=60)
+    game_close_first_wait_seconds: int = Field(default=15, ge=0, le=120)
+    game_close_additional_wait_seconds: int = Field(default=30, ge=0, le=180)
+    game_force_terminate_wait_seconds: int = Field(default=3, ge=0, le=30)
     overlay_backend_url: str = "http://127.0.0.1:8000"
 
 

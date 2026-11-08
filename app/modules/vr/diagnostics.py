@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import psutil
 
 from app.core.config import Settings, settings
 from app.modules.steam.integration import SteamIntegration
+from app.modules.vr.meta_runtime import query_meta_runtime
 
 _OPENVR_LOCK = threading.Lock()
 _STEAMVR_APP_ID = 250820
@@ -26,6 +28,7 @@ class VRDiagnostics:
     def __init__(self, config: Settings = settings, steam: SteamIntegration | None = None):
         self.config = config
         self.steam = steam or SteamIntegration(config)
+        self._meta_cache: tuple[float, dict] | None = None
 
     def inspect(self, mode: str = "oculus") -> dict[str, Any]:
         if mode not in {"oculus", "steamvr"}:
@@ -47,8 +50,16 @@ class VRDiagnostics:
         meta_client_running = self._process_running("OculusClient.exe", meta_root) if client_installed else None
         dash_running = self._process_running("OculusDash.exe", meta_root) if meta_root else None
 
-        hmd_connected = openvr["hmd_connected"] if mode == "steamvr" else "unknown"
-        tracked = openvr["tracking_valid"] if mode == "steamvr" else "unknown"
+        acc_running = bool(self.steam.find_game_processes())
+        meta_probe = (self._meta_status(meta_root, runtime_service, acc_running) if mode == "oculus" else {
+            "runtime": "unknown", "connected": "unknown", "tracking": "unknown",
+            "worn": "unknown", "source": "Meta PC SDK não consultado neste modo.", "detail": ""})
+
+        hmd_connected = (openvr["hmd_connected"] if mode == "steamvr"
+                         else meta_probe["connected"])
+        tracked = (openvr["tracking_valid"] if mode == "steamvr"
+                   else meta_probe["tracking"])
+        pcvr = self._pcvr_status(mode, steamvr_running, hmd_connected, tracked, meta_probe)
         return {
             "mode": mode,
             "mode_label": "SteamVR" if mode == "steamvr" else "VR Oculus",
@@ -61,9 +72,12 @@ class VRDiagnostics:
                           "dashboard_running": _state(dash_running),
                           "runtime_installed": _state(runtime_installed),
                           "runtime_service": runtime_service,
-                          "headset_connected": "unknown",
-                          "headset_worn": "unknown",
-                          "note": "Processos e serviÃ§o ativos nÃ£o confirmam conexÃ£o ou uso do headset."},
+                          "headset_connected": meta_probe["connected"],
+                          "headset_worn": meta_probe["worn"],
+                          "tracking": meta_probe["tracking"],
+                          "source": meta_probe["source"],
+                          "detail": meta_probe["detail"],
+                          "note": "Processos e serviço não são usados como prova de conexão."},
             "steamvr": {"installed": _state(steamvr_installed),
                         "runtime_running": _state(steamvr_running),
                         "hmd_connected": hmd_connected,
@@ -75,15 +89,69 @@ class VRDiagnostics:
                         "detail": openvr["error"]},
             "overall": self._overall(mode, steam_status, runtime_installed, runtime_service,
                                      hmd_connected, tracked, steamvr_running),
+            "pcvr": pcvr,
             "read_only": True,
         }
+
+    def _meta_status(self, root: Path | None, service: str, acc_running: bool = False) -> dict:
+        if not root or not (root / "Support" / "oculus-runtime" / "LibOVRRT64_1.dll").is_file():
+            return {"runtime": "unavailable", "connected": "unknown", "tracking": "unknown",
+                    "worn": "unknown", "source": "Meta PC SDK (LibOVR)",
+                    "detail": "Runtime Meta não instalado ou biblioteca ausente."}
+        if service == "unavailable":
+            return {"runtime": "unavailable", "connected": "unknown", "tracking": "unknown",
+                    "worn": "unknown", "source": "Meta PC SDK (LibOVR)",
+                    "detail": "O serviço do runtime Meta não está disponível; headset não foi presumido desconectado."}
+        if service != "available":
+            return {"runtime": "unknown", "connected": "unknown", "tracking": "unknown",
+                    "worn": "unknown", "source": "Meta PC SDK (LibOVR)",
+                    "detail": "Não foi possível confirmar o estado do serviço necessário para consultar o runtime."}
+        if acc_running:
+            return {"runtime": "available", "connected": "unknown", "tracking": "unknown",
+                    "worn": "unknown", "source": "Meta PC SDK (LibOVR)",
+                    "detail": "Consulta pausada enquanto o ACC está ativo para não disputar a sessão do runtime."}
+        now = time.monotonic()
+        if self._meta_cache and now - self._meta_cache[0] < 10:
+            return self._meta_cache[1]
+        result = query_meta_runtime(root)
+        self._meta_cache = (now, result)
+        return result
+
+    @staticmethod
+    def _pcvr_status(mode: str, steamvr_running: bool | None, connected: str,
+                     tracking: str, meta: dict) -> dict[str, str]:
+        if mode == "oculus":
+            runtime = meta["runtime"]
+            source = meta["source"]
+            detail = meta["detail"]
+            if runtime == "unavailable":
+                return {"state": "runtime_unavailable", "label": "RUNTIME INDISPONÍVEL",
+                        "source": source, "detail": detail}
+            if connected == "connected" and tracking == "available":
+                return {"state": "connected", "label": "CONECTADO", "source": source, "detail": detail}
+            if connected == "disconnected":
+                return {"state": "disconnected", "label": "DESCONECTADO", "source": source, "detail": detail}
+            return {"state": "unknown", "label": "ESTADO DESCONHECIDO", "source": source, "detail": detail}
+        source = "Valve OpenVR (SteamVR)"
+        if steamvr_running is not True:
+            state = "runtime_unavailable" if steamvr_running is False else "unknown"
+            return {"state": state, "label": "RUNTIME INDISPONÍVEL" if state == "runtime_unavailable" else "ESTADO DESCONHECIDO",
+                    "source": source, "detail": "SteamVR não está em execução; a consulta não inicia o runtime."}
+        if connected == "unavailable":
+            return {"state": "disconnected", "label": "DESCONECTADO", "source": source,
+                    "detail": "OpenVR informa que não há HMD conectado."}
+        if connected == "available" and tracking == "available":
+            return {"state": "connected", "label": "CONECTADO", "source": source,
+                    "detail": "HMD conectado e pose de tracking válida."}
+        return {"state": "unknown", "label": "ESTADO DESCONHECIDO", "source": source,
+                "detail": "OpenVR não confirmou conexão e tracking válidos."}
 
     @staticmethod
     def _overall(mode: str, steam: dict, meta_installed: bool, service: str,
                  connected: str, tracked: str, steamvr_running: bool | None) -> str:
         if mode == "steamvr":
             if steamvr_running is False:
-                return "runtime_not_running"
+                return "runtime_unavailable"
             if steamvr_running is None:
                 return "unknown"
             if connected == "unavailable":
@@ -92,9 +160,13 @@ class VRDiagnostics:
                 return "ready"
             return "unknown"
         if not meta_installed:
-            return "software_not_installed"
+            return "runtime_unavailable"
         if service == "unavailable":
-            return "runtime_not_running"
+            return "runtime_unavailable"
+        if connected == "connected" and tracked == "available":
+            return "ready"
+        if connected == "disconnected":
+            return "headset_not_connected"
         return "unknown"
 
     def _steam_root(self) -> Path | None:

@@ -66,6 +66,7 @@ def migrate_session_operational_columns(db: Session) -> list[str]:
         "interrupted_by": "INTEGER REFERENCES users(id)",
         "interruption_reason": "VARCHAR(80)",
         "interruption_note": "TEXT",
+        "launch_mode": "VARCHAR(32) NOT NULL DEFAULT 'monitor'",
     }
     added = []
     with bind.begin() as connection:
@@ -92,13 +93,15 @@ def recover_open_sessions(db: Session, steam) -> int:
     close_failed = False
     if should_close_game:
         try:
-            steam.close_game()
+            steam.close_game(origin="startup_recovery")
             if steam.find_game_processes():
                 close_failed = True
         except Exception:
             close_failed = True
     now = datetime.now(timezone.utc)
     for session in active:
+        if close_failed and session.end_requested_at is None:
+            session.end_requested_at = now
         if session.status == "running" and session.started_at:
             started = session.started_at
             if started.tzinfo is None:

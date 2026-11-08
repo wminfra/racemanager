@@ -24,6 +24,8 @@ class FakeSteam:
         self.close_calls = 0
         self.close_error = None
         self.leave_running_on_close = False
+        self.shutdown_state = "RUNNING"
+        self.force_calls = 0
 
     def inspect(self):
         return {"ready": self.ready, "steam_installed": self.ready, "game_installed": self.ready,
@@ -34,20 +36,36 @@ class FakeSteam:
     def find_game_processes(self):
         return [object()] if self.running else []
 
-    def launch_game(self):
+    def launch_game(self, mode="monitor"):
         self.launch_calls += 1
+        self.last_launch_mode = mode
         if self.launch_error:
             raise RuntimeError(self.launch_error)
         if not self.ready:
             raise RuntimeError("Steam indisponível")
         self.running = self.auto_start
 
-    def close_game(self, grace_seconds=8):
+    def close_game(self, origin="test", retry=False):
         self.close_calls += 1
         if self.close_error:
+            self.shutdown_state = "CLOSE_FAILED"
             raise RuntimeError(self.close_error)
         if not self.leave_running_on_close:
             self.running = False
+            self.shutdown_state = "CLOSED"
+        else:
+            self.shutdown_state = "CLOSE_FAILED"
+
+    def close_status(self):
+        return {"state": self.shutdown_state, "error": self.close_error}
+
+    def force_close_game(self, origin, confirmed):
+        if not confirmed:
+            raise ValueError("Confirmação necessária")
+        self.force_calls += 1
+        self.running = False
+        self.shutdown_state = "CLOSED"
+        return self.close_status()
 
     def is_game_unresponsive(self, processes=None):
         return self.unresponsive and self.running

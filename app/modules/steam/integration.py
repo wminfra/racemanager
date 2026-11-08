@@ -6,14 +6,17 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
+import logging
 
 import psutil
 
 from app.core.config import Settings, settings
 from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE, GameDefinition
+from app.modules.steam.shutdown import GameCloseError, GameShutdownService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,12 @@ class SteamIntegration:
         self.game = game
         self._cached_root: Path | None = None
         self._cached_executable: Path | None = None
+        self.shutdown = GameShutdownService(
+            self,
+            first_wait_seconds=config.game_close_first_wait_seconds,
+            additional_wait_seconds=config.game_close_additional_wait_seconds,
+            force_terminate_wait_seconds=config.game_force_terminate_wait_seconds,
+        )
 
     def inspect(self) -> dict:
         steam_executable = self._steam_executable()
@@ -69,34 +78,49 @@ class SteamIntegration:
             "reason": reason,
         }
 
-    def launch_game(self) -> None:
+    def launch_game(self, mode: str = "monitor") -> None:
+        launch_mode = self.game.launch_mode(mode)
+        logger.info("[GAME-LAUNCH] mode=%s appid=%s args=%r", mode, self.game.app_id,
+                    list(launch_mode.arguments))
         status = self.inspect()
         if not status["ready"]:
             raise RuntimeError(status["reason"])
         if self.find_game_processes():
-            raise RuntimeError(f"{self.game.name} já está em execução.")
-        if not hasattr(os, "startfile"):
-            raise RuntimeError("A abertura do protocolo Steam requer Windows.")
+            raise RuntimeError(f"{self.game.name} j? est? em execu??o.")
+        steam_executable = self._steam_executable()
+        if not steam_executable:
+            raise RuntimeError("Execut?vel Steam n?o encontrado.")
         try:
-            os.startfile(self.game.launch_uri)  # type: ignore[attr-defined]
+            # Invoke the authenticated conventional Steam client with one
+            # explicit, catalog-controlled mode argument vector.
+            subprocess.Popen([str(steam_executable), "-applaunch", str(self.game.app_id),
+                              *launch_mode.arguments], close_fds=True)
         except OSError as exc:
-            raise RuntimeError(f"Não foi possível abrir {self.game.launch_uri}: {exc}") from exc
+            raise RuntimeError(f"N?o foi poss?vel solicitar a inicializa??o do jogo: {exc}") from exc
 
     def find_game_processes(self) -> list[GameProcess]:
         status = self.inspect()
         executable = status["game_executable"]
-        if not executable:
-            return []
-        expected = self._normalize_path(executable)
+        expected = self._normalize_path(executable) if executable else None
         found: list[GameProcess] = []
         for proc in psutil.process_iter(["pid", "name", "exe"]):
             try:
                 name = proc.info.get("name") or ""
                 process_executable = proc.info.get("exe") or ""
-                if name.casefold() == self.game.executable_name.casefold() and self._normalize_path(process_executable) == expected:
+                if name.casefold() != self.game.executable_name.casefold():
+                    continue
+                if not process_executable or not expected:
+                    # Keep the simulator unavailable when the executable path
+                    # cannot be read; shutdown will refuse to signal this PID.
+                    found.append(GameProcess(proc.info["pid"], name, ""))
+                elif self._normalize_path(process_executable) == expected:
                     found.append(GameProcess(proc.info["pid"], name, process_executable))
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            except psutil.NoSuchProcess:
                 continue
+            except (psutil.AccessDenied, OSError):
+                name = proc.info.get("name") or ""
+                if name.casefold() == self.game.executable_name.casefold():
+                    found.append(GameProcess(proc.info.get("pid", -1), name, ""))
         return found
 
     def is_game_unresponsive(self, processes: list[GameProcess] | None = None) -> bool:
@@ -121,48 +145,14 @@ class SteamIntegration:
         user32.EnumWindows(callback_type(visit), 0)
         return hung
 
-    def close_game(self, grace_seconds: int = 8) -> None:
-        processes = self.find_game_processes()
-        if not processes:
-            return
-        pids = {item.pid for item in processes}
-        if sys.platform == "win32":
-            self._post_close_to_windows(pids)
-        deadline = time.monotonic() + grace_seconds
-        while time.monotonic() < deadline and self._same_processes_alive(processes):
-            time.sleep(0.2)
-        candidates = []
-        for item in processes:
-            try:
-                proc = psutil.Process(item.pid)
-                if self._normalize_path(proc.exe()) == self._normalize_path(item.executable):
-                    candidates.append(proc)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-                continue
-        for proc in candidates:
-            try:
-                proc.terminate()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-                continue
-        _, alive = psutil.wait_procs(candidates, timeout=2)
-        for proc in alive:
-            try:
-                expected = next(item.executable for item in processes if item.pid == proc.pid)
-                if self._normalize_path(proc.exe()) == self._normalize_path(expected):
-                    proc.kill()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError, StopIteration):
-                continue
+    def close_game(self, origin: str = "operator", retry: bool = False) -> dict:
+        return self.shutdown.close(origin=origin, retry=retry)
 
-    @staticmethod
-    def _same_processes_alive(processes: list[GameProcess]) -> bool:
-        for item in processes:
-            try:
-                proc = psutil.Process(item.pid)
-                if SteamIntegration._normalize_path(proc.exe()) == SteamIntegration._normalize_path(item.executable):
-                    return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-                continue
-        return False
+    def force_close_game(self, origin: str, confirmed: bool) -> dict:
+        return self.shutdown.force_close(origin=origin, confirmed=confirmed)
+
+    def close_status(self) -> dict:
+        return self.shutdown.status()
 
     @staticmethod
     def _normalize_path(value: str | Path) -> str:
@@ -290,17 +280,24 @@ class SteamIntegration:
         return None
 
     @staticmethod
-    def _post_close_to_windows(pids: set[int]) -> None:
+    def _post_close_to_windows(pids: set[int]) -> int:
         if sys.platform != "win32":
-            return
+            return 0
         user32 = ctypes.windll.user32
         callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
+        posted = 0
+
         def visit(hwnd, _):
+            nonlocal posted
             pid = ctypes.c_ulong()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value in pids and user32.IsWindowVisible(hwnd):
-                user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+            if (pid.value in pids and user32.IsWindowVisible(hwnd)
+                    and not user32.GetWindow(hwnd, 4)  # GW_OWNER: top-level, unowned window
+                    and user32.GetWindowTextLengthW(hwnd) > 0):
+                if user32.PostMessageW(hwnd, 0x0010, 0, 0):  # WM_CLOSE, same request as window X
+                    posted += 1
             return True
 
         user32.EnumWindows(callback_type(visit), 0)
+        return posted

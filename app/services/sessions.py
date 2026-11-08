@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import AppSetting, AuditLog, Game, RacingSession, Simulator, User
-from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
+from app.modules.games import GAME_CATALOG
 from app.core.config import settings
 
 DEFAULT_DURATIONS = [15, 30, 60]
@@ -81,6 +81,7 @@ def session_view(session: RacingSession) -> dict:
         "id": session.public_id,
         "simulator_id": session.simulator_id,
         "game_id": session.game_id,
+        "launch_mode": session.launch_mode,
         "operator_id": session.operator_id,
         "status": session.status,
         "phase": phase,
@@ -148,7 +149,7 @@ def _audit(db: Session, actor_id: int | None, action: str, session: RacingSessio
 
 
 def begin_session(db: Session, user: User, simulator_id: int, game_id: int,
-                  duration_minutes: int, steam) -> RacingSession:
+                  duration_minutes: int, launch_mode: str, steam) -> RacingSession:
     logger.info("[SESSION] Solicitação recebida.")
     logger.info("[SESSION] Simulador ID: %s.", simulator_id)
     logger.info("[SESSION] Jogo ID: %s.", game_id)
@@ -176,12 +177,15 @@ def begin_session(db: Session, user: User, simulator_id: int, game_id: int,
     if not game.is_enabled:
         logger.warning("[SESSION] Motivo da rejeição: jogo ID %s está desativado.", game_id)
         raise ValueError("Simulador ou jogo indisponível.")
-    if game.name != ASSETTO_CORSA_COMPETIZIONE.name:
-        logger.warning(
-            "[SESSION] Motivo da rejeição: nome do jogo ID %s incompatível (cadastrado=%r; esperado=%r).",
-            game_id, game.name, ASSETTO_CORSA_COMPETIZIONE.name,
-        )
-        raise ValueError("Simulador ou jogo indisponível.")
+    definition = GAME_CATALOG.get(game.name)
+    if not definition:
+        logger.warning("[SESSION] Motivo da rejeição: jogo ID %s não possui configuração de inicialização.", game_id)
+        raise ValueError("O jogo não possui modos de inicialização configurados.")
+    try:
+        definition.launch_mode(launch_mode)
+    except ValueError as exc:
+        logger.warning("[SESSION] Motivo da rejeição: modo %r não suportado para o jogo ID %s.", launch_mode, game_id)
+        raise ValueError(str(exc)) from exc
 
     logger.info("[SESSION] Verificando integração Steam.")
     if steam.find_game_processes():
@@ -190,9 +194,11 @@ def begin_session(db: Session, user: User, simulator_id: int, game_id: int,
     now = datetime.now(timezone.utc)
     session = RacingSession(public_id=str(uuid4()), simulator_id=simulator_id,
         game_id=game_id, operator_id=user.id, status="waiting",
-        created_at=now, guidance_started_at=now, contracted_minutes=duration_minutes)
+        created_at=now, guidance_started_at=now, contracted_minutes=duration_minutes,
+        launch_mode=launch_mode)
     db.add(session)
-    _audit(db, user.id, "session.start_requested", session, f"duration={duration_minutes}m")
+    _audit(db, user.id, "session.start_requested", session,
+           f"duration={duration_minutes}m launch_mode={launch_mode}")
     try:
         db.commit()
     except IntegrityError as exc:
@@ -208,7 +214,7 @@ def cancel_waiting_session(db: Session, public_id: str, user: User, steam) -> Ra
     if session.status != "waiting":
         raise RuntimeError("Somente uma sessão aguardando pode ser cancelada.")
     if session.launch_requested_at:
-        steam.close_game()
+        steam.close_game(origin="operator_cancel")
     session.status = "cancelled"
     session.ended_at = datetime.now(timezone.utc)
     session.effective_seconds = 0
@@ -225,10 +231,16 @@ def end_running_session(db: Session, public_id: str, user: User, steam) -> Racin
     if session.status != "running":
         raise RuntimeError("A sessão não está em andamento.")
     end_requested = datetime.now(timezone.utc)
-    session.end_requested_at = end_requested
-    steam.close_game()
+    if session.end_requested_at is None:
+        session.end_requested_at = end_requested
+        db.commit()
+    close_state = steam.close_status() if hasattr(steam, "close_status") else {}
+    try:
+        steam.close_game(origin="operator_end", retry=close_state.get("state") == "CLOSE_FAILED")
+    except Exception as exc:
+        raise SessionClosureError(str(exc)) from exc
     if steam.find_game_processes():
-        raise RuntimeError("O jogo não encerrou; verifique o computador do simulador.")
+        raise SessionClosureError("O ACC não encerrou; o simulador permanece bloqueado.")
     now = datetime.now(timezone.utc)
     started = session.started_at or now
     if started.tzinfo is None:
@@ -284,7 +296,7 @@ def interrupt_running_session(db: Session, public_id: str, user: User, steam,
 
     close_error = None
     try:
-        steam.close_game(grace_seconds=settings.interruption_close_grace_seconds)
+        steam.close_game(origin="operator_interruption")
     except Exception as exc:
         close_error = exc
         logger.exception("ACC close request failed for interrupted session %s", session.public_id)
@@ -319,5 +331,69 @@ def interrupt_running_session(db: Session, public_id: str, user: User, steam,
     if close_error:
         detail += " close_request_warning=process_absent_after_verification"
     db.add(AuditLog(actor_id=user.id, action="session.interrupted_by_operator", details=detail[:2000]))
+    db.commit()
+    return session
+
+
+def retry_session_close(db: Session, public_id: str, user: User, steam,
+                        force: bool = False, confirmed: bool = False) -> RacingSession:
+    session = db.scalar(select(RacingSession).where(RacingSession.public_id == public_id))
+    if not session:
+        raise LookupError("Sessão não encontrada.")
+    if session.status not in {"waiting", "running", "technical_failure"}:
+        raise RuntimeError("A sessão não possui encerramento pendente.")
+    if not (session.end_requested_at or session.interrupted_at or session.launch_requested_at):
+        raise RuntimeError("Não há uma solicitação de encerramento pendente para esta sessão.")
+
+    try:
+        if force:
+            steam.force_close_game(origin="operator_confirmed_force", confirmed=confirmed)
+        else:
+            steam.close_game(origin="operator_retry", retry=True)
+    except (ValueError, RuntimeError) as exc:
+        raise SessionClosureError(str(exc)) from exc
+    if steam.find_game_processes():
+        raise SessionClosureError("O ACC continua ativo; o simulador permanece bloqueado.")
+
+    now = datetime.now(timezone.utc)
+    simulator = db.get(Simulator, session.simulator_id)
+    if session.interrupted_at:
+        session.status = "interrupted"
+        session.ended_at = session.interrupted_at
+        session.failure_reason = None
+        action = "session.interruption_closed_after_retry"
+    elif session.launch_requested_at and not session.started_at:
+        session.status = "cancelled"
+        session.ended_at = now
+        session.effective_seconds = 0
+        session.failure_reason = "Inicialização cancelada após fechamento do ACC."
+        action = "session.launch_cancelled_after_retry"
+    elif session.status == "technical_failure" or (session.failure_reason or "").startswith("O jogo parou de responder;"):
+        session.status = "technical_failure"
+        session.ended_at = now
+        started = session.started_at or now
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        requested = session.end_requested_at or now
+        if requested.tzinfo is None:
+            requested = requested.replace(tzinfo=timezone.utc)
+        session.effective_seconds = max(0, int((requested - started).total_seconds()))
+        action = "session.failure_closed_after_operator_retry"
+    else:
+        session.status = "completed"
+        session.ended_at = now
+        started = session.started_at or now
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        requested = session.end_requested_at or now
+        if requested.tzinfo is None:
+            requested = requested.replace(tzinfo=timezone.utc)
+        session.effective_seconds = max(0, int((requested - started).total_seconds()))
+        session.failure_reason = None
+        action = "session.closed_after_operator_retry"
+    if simulator:
+        simulator.status = "ready"
+    db.add(AuditLog(actor_id=user.id, action=action,
+                    details=f"session={session.public_id} forced={force}"))
     db.commit()
     return session

@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.models import AuditLog, RacingSession, Simulator
 from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
+from app.modules.steam.shutdown import GameCloseError
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ class SessionSupervisor:
                             session.launch_requested_at = now
                             db.commit()
                             try:
-                                self.steam.launch_game()
+                                self.steam.launch_game(mode=session.launch_mode)
                                 db.add(AuditLog(actor_id=session.operator_id, action="session.game_launch_requested",
                                     details=f"session={session.public_id}"))
                                 db.commit()
@@ -87,21 +88,40 @@ class SessionSupervisor:
                 remaining = session.contracted_minutes * 60 - int((now - started).total_seconds())
                 if remaining <= 0:
                     end_requested = started + timedelta(minutes=session.contracted_minutes)
-                    session.end_requested_at = end_requested
+                    if session.end_requested_at is None:
+                        session.end_requested_at = end_requested
+                        db.commit()
+                    shutdown = self.steam.close_status() if hasattr(self.steam, "close_status") else {}
+                    if shutdown.get("state") == "CLOSE_FAILED":
+                        if simulator:
+                            simulator.status = "game_unresponsive"
+                        continue
                     try:
-                        self.steam.close_game()
+                        self.steam.close_game(origin="session_timer")
+                    except GameCloseError as exc:
+                        session.failure_reason = str(exc)[:1000]
+                        if simulator:
+                            simulator.status = "game_unresponsive"
+                        db.add(AuditLog(actor_id=session.operator_id, action="session.shutdown_failed",
+                            details=f"session={session.public_id} state=CLOSE_FAILED"))
+                        continue
                     except Exception as exc:
                         self._fail(db, session, now, f"Falha ao encerrar o jogo: {exc}", "session.shutdown_failed")
                         continue
                     if self.steam.find_game_processes():
-                        self._fail(db, session, now, "O jogo permaneceu ativo após o encerramento controlado.", "session.shutdown_failed")
+                        session.failure_reason = "O ACC permaneceu ativo apos o fechamento normal; o simulador continua bloqueado."
+                        if simulator:
+                            simulator.status = "game_unresponsive"
+                        db.add(AuditLog(actor_id=session.operator_id, action="session.shutdown_failed",
+                            details=f"session={session.public_id} state=CLOSE_FAILED"))
                     else:
                         session.status = "completed"
                         session.ended_at = datetime.now(timezone.utc)
                         session.effective_seconds = max(0, int((end_requested - started).total_seconds()))
+                        session.failure_reason = None
                         db.add(AuditLog(actor_id=session.operator_id, action="session.completed_by_timer",
                             details=f"session={session.public_id}"))
-                    if simulator:
+                    if simulator and session.status == "completed":
                         simulator.status = "ready"
                     continue
 
@@ -119,11 +139,34 @@ class SessionSupervisor:
                       and self.steam.is_game_unresponsive(processes)):
                     if simulator:
                         simulator.status = "game_unresponsive"
+                    if session.end_requested_at is None:
+                        session.end_requested_at = now
+                        db.commit()
+                    shutdown = self.steam.close_status() if hasattr(self.steam, "close_status") else {}
+                    if shutdown.get("state") == "CLOSE_FAILED":
+                        continue
                     try:
-                        self.steam.close_game()
+                        self.steam.close_game(origin="unresponsive_monitor")
+                    except GameCloseError as exc:
+                        session.failure_reason = ("O Windows sinalizou uma janela do processo do ACC como não respondendo; "
+                                                  "o WM_CLOSE não confirmou o encerramento: " + str(exc))[:1000]
+                        db.add(AuditLog(actor_id=session.operator_id, action="session.shutdown_failed",
+                            details=f"session={session.public_id} origin=unresponsive_monitor state=CLOSE_FAILED"))
+                        continue
                     except Exception:
                         logger.exception("Failed to close unresponsive Assetto Corsa process")
-                    self._fail(db, session, now, "O jogo parou de responder.", "session.game_unresponsive")
+                        continue
+                    if self.steam.find_game_processes():
+                        session.failure_reason = ("O Windows sinalizou uma janela do processo do ACC como não respondendo; "
+                                                  "o jogo continua ativo após o pedido WM_CLOSE.")
+                        if simulator:
+                            simulator.status = "game_unresponsive"
+                        db.add(AuditLog(actor_id=session.operator_id, action="session.shutdown_failed",
+                            details=f"session={session.public_id} origin=unresponsive_monitor state=CLOSE_FAILED"))
+                        continue
+                    self._fail(db, session, now,
+                               "O Windows sinalizou uma janela do processo do ACC como não respondendo; "
+                               "o jogo encerrou após o pedido WM_CLOSE.", "session.game_unresponsive")
                 elif simulator:
                     simulator.status = "game_running"
             db.commit()

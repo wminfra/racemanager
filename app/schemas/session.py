@@ -9,6 +9,7 @@ class SessionCreate(BaseModel):
     duration_minutes: int = Field(ge=1, le=240)
     simulator_id: int = Field(default=1, gt=0)
     game_id: int = Field(default=1, gt=0)
+    launch_mode: Literal["monitor", "oculus", "steamvr"]
 
 
 class SessionDurationsUpdate(BaseModel):
@@ -30,3 +31,7 @@ class SessionInterrupt(BaseModel):
         if self.reason != "Outro" and self.observation and self.observation.strip():
             raise ValueError("A observação só pode ser preenchida para o motivo Outro.")
         return self
+
+
+class ForceCloseConfirm(BaseModel):
+    confirmed: bool

@@ -16,10 +16,10 @@ def test_session_timestamp_migration_adds_nullable_columns_without_rebuilding_ro
         )
     with Session(engine) as db:
         added = migrate_session_operational_columns(db)
-        assert added == ["guidance_started_at", "launch_requested_at", "end_requested_at", "interrupted_at", "interrupted_by", "interruption_reason", "interruption_note"]
+        assert added == ["guidance_started_at", "launch_requested_at", "end_requested_at", "interrupted_at", "interrupted_by", "interruption_reason", "interruption_note", "launch_mode"]
         assert migrate_session_operational_columns(db) == []
         row = db.execute(text("SELECT id, public_id, status, contracted_minutes, guidance_started_at, interrupted_at, "
-                              "interrupted_by, interruption_reason, interruption_note "
+                              "interrupted_by, interruption_reason, interruption_note, launch_mode "
                               "FROM sessions WHERE id=1")).one()
-        assert tuple(row) == (1, "legacy-keep", "completed", 15, None, None, None, None, None)
+        assert tuple(row) == (1, "legacy-keep", "completed", 15, None, None, None, None, None, "monitor")
     engine.dispose()

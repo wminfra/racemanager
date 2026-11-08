@@ -13,14 +13,16 @@ from app.core.config import settings
 from app.database.session import get_db
 from app.models import AppSetting, AuditLog, Game, RacingSession, Simulator, User
 from app.schemas.auth import LoginRequest, UserCreate
-from app.schemas.session import SessionCreate, SessionDurationsUpdate, SessionInterrupt
+from app.schemas.session import ForceCloseConfirm, SessionCreate, SessionDurationsUpdate, SessionInterrupt
 from app.services.audit import record
 from app.services.auth import hash_password, verify_password
 from app.services.history import HISTORY_STATUSES, INTERRUPTION_REASONS, read_history
 from app.services.sessions import (begin_session, cancel_waiting_session, configured_durations,
                                    end_running_session, interrupt_running_session,
-                                   public_kiosk_state, session_view, SessionClosureError)
+                                   public_kiosk_state, retry_session_close, session_view,
+                                   SessionClosureError)
 from app.modules.vr.diagnostics import VRDiagnostics
+from app.modules.games import GAME_CATALOG
 
 router = APIRouter()
 _login_attempts: dict[str, list[float]] = {}
@@ -89,12 +91,14 @@ def _simulator_status(db: Session, simulator_id: int, steam) -> dict:
 
 
 @router.get("/operator/status")
-def operator_status(request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def operator_status(request: Request, db: Session = Depends(get_db), user: User = Depends(operator_or_admin)):
     status = _simulator_status(db, 1, request.app.state.steam)
     local_midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     status["today_count"] = db.scalar(select(func.count(RacingSession.id)).where(
         RacingSession.created_at >= local_midnight)) or 0
     status["operator"] = user.username
+    status["shutdown"] = (request.app.state.steam.close_status()
+                          if hasattr(request.app.state.steam, "close_status") else {"state": "RUNNING"})
     status["recent_failure"] = db.scalar(select(RacingSession).where(
         RacingSession.status == "technical_failure").order_by(RacingSession.ended_at.desc()))
     status["recent_failure"] = session_view(status["recent_failure"]) if status["recent_failure"] else None
@@ -115,6 +119,15 @@ def operator_vr_diagnostic(request: Request,
 @router.get("/sessions/durations")
 def session_durations(db: Session = Depends(get_db), user: User = Depends(current_user)):
     return {"durations": configured_durations(db, include_test_durations=True)}
+
+
+@router.get("/operator/games")
+def operator_games(db: Session = Depends(get_db), user: User = Depends(operator_or_admin)):
+    games = db.scalars(select(Game).where(Game.is_enabled.is_(True)).order_by(Game.name)).all()
+    return {"games": [{"id": game.id, "name": game.name,
+                        "launch_modes": [{"id": mode.id, "label": mode.label}
+                                         for mode in GAME_CATALOG.modes_for(game.name)]}
+                       for game in games if GAME_CATALOG.get(game.name)]}
 
 
 @router.get("/operator/sessions")
@@ -141,8 +154,16 @@ def start_session(payload: SessionCreate, request: Request,
                   db: Session = Depends(get_db), user: User = Depends(current_user)):
     try:
         with request.app.state.session_transition_lock:
+            if payload.launch_mode != "monitor":
+                diagnostics = request.app.state.vr_diagnostics.inspect(payload.launch_mode)
+                status = diagnostics.get("pcvr", {})
+                if status.get("state") != "connected":
+                    detail = status.get("detail") or "Headset e tracking ainda não foram confirmados."
+                    raise HTTPException(409, f"{status.get('label', 'ESTADO DESCONHECIDO')}: {detail}")
             session = begin_session(db, user, payload.simulator_id, payload.game_id,
-                                    payload.duration_minutes, request.app.state.steam)
+                                    payload.duration_minutes, payload.launch_mode, request.app.state.steam)
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     except RuntimeError as exc:
@@ -172,6 +193,43 @@ def finish_session(public_id: str, request: Request,
         return session_view(session)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except SessionClosureError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/sessions/{public_id}/close/retry")
+def retry_close_session(public_id: str, request: Request,
+                        db: Session = Depends(get_db), user: User = Depends(operator_or_admin)):
+    try:
+        with request.app.state.session_transition_lock:
+            session = retry_session_close(db, public_id, user, request.app.state.steam)
+        return session_view(session)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except SessionClosureError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/sessions/{public_id}/close/force")
+def force_close_session(public_id: str, payload: ForceCloseConfirm, request: Request,
+                        db: Session = Depends(get_db), user: User = Depends(operator_or_admin)):
+    if not payload.confirmed:
+        raise HTTPException(422, "Confirme explicitamente o risco antes de forcar o encerramento.")
+    try:
+        with request.app.state.session_transition_lock:
+            session = retry_session_close(db, public_id, user, request.app.state.steam,
+                                          force=True, confirmed=payload.confirmed)
+        return session_view(session)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except SessionClosureError as exc:
+        raise HTTPException(503, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
 

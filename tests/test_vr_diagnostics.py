@@ -113,3 +113,42 @@ def test_operator_vr_diagnostic_requires_operator_or_admin(client, db_session, m
     assert result.status_code == 200
     assert result.json()["read_only"] is True
     assert client.get("/api/operator/vr/diagnostic?mode=unknown").status_code == 422
+
+
+@pytest.mark.parametrize(("runtime", "connected", "tracking", "expected"), [
+    ("available", "connected", "available", "connected"),
+    ("available", "disconnected", "unavailable", "disconnected"),
+    ("unavailable", "unknown", "unknown", "runtime_unavailable"),
+    ("available", "unknown", "unknown", "unknown"),
+])
+def test_meta_pcvr_state_requires_runtime_hmd_and_tracking(runtime, connected, tracking, expected):
+    meta = {"runtime": runtime, "connected": connected, "tracking": tracking,
+            "worn": "unknown", "source": "Meta PC SDK (LibOVR)", "detail": "simulado"}
+    result = VRDiagnostics._pcvr_status("oculus", False, connected, tracking, meta)
+    assert result["state"] == expected
+    assert result["source"] == "Meta PC SDK (LibOVR)"
+
+
+def test_oculus_probe_does_not_require_steamvr(monkeypatch, tmp_path):
+    meta = {"runtime": "available", "connected": "connected", "tracking": "available",
+            "worn": "available", "source": "Meta PC SDK (LibOVR)", "detail": "HMD e tracking OK"}
+    result = VRDiagnostics._pcvr_status("oculus", False, "connected", "available", meta)
+    assert result["state"] == "connected"
+
+
+def test_meta_runtime_query_uses_sdk_only_when_runtime_library_exists(monkeypatch, tmp_path):
+    diag = VRDiagnostics(steam=FakeSteam())
+    root = tmp_path / "Meta Horizon"
+    runtime = root / "Support" / "oculus-runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "LibOVRRT64_1.dll").touch()
+    monkeypatch.setattr(diag, "_meta_root", lambda: root)
+    monkeypatch.setattr(diag, "_steamvr_root", lambda: None)
+    monkeypatch.setattr(diag, "_oculus_service_state", lambda: "available")
+    monkeypatch.setattr("app.modules.vr.diagnostics.query_meta_runtime", lambda _root: {
+        "runtime": "available", "connected": "connected", "tracking": "available",
+        "worn": "available", "source": "Meta PC SDK (LibOVR)", "detail": "tracking v?lido"})
+    result = diag.inspect("oculus")
+    assert result["pcvr"]["state"] == "connected"
+    assert result["meta_link"]["headset_connected"] == "connected"
+    assert result["pcvr"]["source"] == "Meta PC SDK (LibOVR)"

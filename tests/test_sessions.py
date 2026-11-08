@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import logging
+import pytest
 from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func, select
@@ -20,7 +21,7 @@ def operator_login(client, db_session):
 
 def create_session(client, db_session, duration=15):
     operator_login(client, db_session)
-    response = client.post("/api/sessions", json={"duration_minutes": duration, "simulator_id": 1, "game_id": 1})
+    response = client.post("/api/sessions", json={"duration_minutes": duration, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor"})
     if response.status_code == 201:
         supervisor = SessionSupervisor(client.session_factory, client.steam, guidance_duration_seconds=0)
         supervisor.tick()
@@ -44,7 +45,7 @@ def test_session_starts_through_steam_adapter(client, db_session, caplog):
 def test_session_does_not_launch_game_before_guidance_finishes(client, db_session):
     operator_login(client, db_session)
     response = client.post("/api/sessions", json={
-        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor",
     })
     row = db_session.scalar(select(RacingSession))
     assert response.status_code == 201
@@ -57,7 +58,7 @@ def test_session_does_not_launch_game_before_guidance_finishes(client, db_sessio
 def test_cancel_during_guidance_never_launches_or_closes_a_game(client, db_session):
     operator_login(client, db_session)
     response = client.post("/api/sessions", json={
-        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor",
     })
     result = client.post(f"/api/sessions/{response.json()['id']}/cancel")
     row = db_session.scalar(select(RacingSession))
@@ -71,7 +72,7 @@ def test_cancel_during_guidance_never_launches_or_closes_a_game(client, db_sessi
 def test_guidance_launch_records_failed_steam_attempt(client, db_session):
     operator_login(client, db_session)
     response = client.post("/api/sessions", json={
-        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor",
     })
     supervisor = SessionSupervisor(client.session_factory, client.steam, guidance_duration_seconds=0)
     client.steam.ready = False
@@ -85,7 +86,7 @@ def test_guidance_launch_records_failed_steam_attempt(client, db_session):
     assert client.steam.launch_calls == 1
 
 
-def test_game_mismatch_returns_specific_session_rejection_log(client, db_session, caplog, monkeypatch):
+def test_unregistered_game_is_rejected_before_start(client, db_session, caplog, monkeypatch):
     monkeypatch.setattr(settings, "short_session_test_mode", True)
     operator_login(client, db_session)
     game = db_session.get(Game, 1)
@@ -94,24 +95,18 @@ def test_game_mismatch_returns_specific_session_rejection_log(client, db_session
 
     with caplog.at_level(logging.INFO, logger="app.services.sessions"):
         response = client.post("/api/sessions", json={
-            "duration_minutes": 2, "simulator_id": 1, "game_id": 1,
+            "duration_minutes": 2, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor",
         })
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "Simulador ou jogo indisponível."
-    assert "[SESSION] Solicitação recebida." in caplog.text
-    assert "[SESSION] Simulador ID: 1." in caplog.text
-    assert "[SESSION] Jogo ID: 1." in caplog.text
-    assert "[SESSION] Verificando disponibilidade do simulador." in caplog.text
-    assert "[SESSION] Verificando disponibilidade do jogo." in caplog.text
-    assert "cadastrado='Assetto Corsa'; esperado='Assetto Corsa Competizione'" in caplog.text
-    assert "[SESSION] Motivo da rejeição:" in caplog.text
-    assert "[SESSION] Verificando integração Steam." not in caplog.text
+    assert response.json()["detail"].startswith("O jogo") and response.json()["detail"].endswith("configurados.")
+    assert "Motivo da rejei??o: jogo ID 1" in caplog.text
+    assert "[SESSION] Verificando integra??o Steam." not in caplog.text
 
 
 def test_two_simultaneous_sessions_are_prevented(client, db_session):
     assert create_session(client, db_session).status_code == 201
-    second = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1})
+    second = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor"})
     assert second.status_code == 409
     assert client.steam.launch_calls == 1
 
@@ -119,7 +114,7 @@ def test_two_simultaneous_sessions_are_prevented(client, db_session):
 def test_session_cannot_start_when_steam_is_not_ready(client, db_session):
     operator_login(client, db_session)
     client.steam.ready = False
-    response = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1})
+    response = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor"})
     assert response.status_code == 201
     assert client.steam.launch_calls == 0
 
@@ -138,7 +133,7 @@ def test_one_and_two_minute_test_options_are_temporary_and_not_admin_packages(cl
 def test_launch_failure_is_recorded(client, db_session):
     operator_login(client, db_session)
     client.steam.launch_error = "simulated launch failure"
-    response = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1})
+    response = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor"})
     SessionSupervisor(client.session_factory, client.steam, guidance_duration_seconds=0).tick()
     assert response.status_code == 201
     row = db_session.scalar(select(RacingSession))
@@ -211,7 +206,7 @@ def test_interruption_without_active_session_and_kiosk_requests_are_rejected(cli
     operator_login(client, db_session)
     missing = client.post("/api/sessions/unknown/interrupt", json={"reason": "Problema no jogo"})
     assert missing.status_code == 404
-    waiting = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1})
+    waiting = client.post("/api/sessions", json={"duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor"})
     rejected = client.post(f"/api/sessions/{waiting.json()['id']}/interrupt", json={"reason": "Problema no jogo"})
     assert rejected.status_code == 409
 
@@ -226,10 +221,10 @@ def test_user_without_operator_or_admin_role_cannot_interrupt(client, db_session
 def test_simultaneous_interruption_requests_close_game_only_once(client, db_session):
     session_id, row = running_session(client, db_session)
     original_close = client.steam.close_game
-    def delayed_close(grace_seconds=8):
+    def delayed_close(origin="test", retry=False):
         import time
         time.sleep(0.15)
-        original_close(grace_seconds)
+        original_close(origin, retry)
     client.steam.close_game = delayed_close
     payload = {"reason": "Solicitação do cliente"}
     from app.core.config import settings
@@ -299,6 +294,101 @@ def test_timer_completes_once_and_closes_only_the_adapter_process(client, db_ses
     assert row.effective_seconds == 15 * 60
     assert client.steam.close_calls == 1
     assert db_session.scalar(select(func.count(RacingSession.id))) == 1
+
+
+def test_manual_end_uses_graceful_close_and_marks_session_after_exit(client, db_session):
+    session_id, row = running_session(client, db_session)
+    result = client.post(f"/api/sessions/{session_id}/end")
+    assert result.status_code == 200
+    db_session.refresh(row)
+    assert row.status == "completed"
+    assert client.steam.close_calls == 1
+    assert client.steam.force_calls == 0
+    assert client.get("/api/operator/status").json()["shutdown"]["state"] == "CLOSED"
+
+
+def test_failed_manual_close_keeps_simulator_occupied_and_allows_graceful_retry(client, db_session):
+    session_id, row = running_session(client, db_session)
+    client.steam.leave_running_on_close = True
+    failed = client.post(f"/api/sessions/{session_id}/end")
+    assert failed.status_code == 503
+    db_session.refresh(row)
+    assert row.status == "running"
+    assert row.end_requested_at is not None
+    assert client.get("/api/operator/status").json()["available"] is False
+    assert client.get("/api/operator/status").json()["shutdown"]["state"] == "CLOSE_FAILED"
+
+    client.steam.leave_running_on_close = False
+    retried = client.post(f"/api/sessions/{session_id}/close/retry")
+    assert retried.status_code == 200
+    db_session.refresh(row)
+    assert row.status == "completed"
+    assert client.steam.close_calls == 2
+    assert client.steam.force_calls == 0
+    assert db_session.get(Simulator, row.simulator_id).status == "ready"
+
+
+def test_forced_close_requires_explicit_confirmation_after_normal_failure(client, db_session):
+    session_id, row = running_session(client, db_session)
+    client.steam.leave_running_on_close = True
+    failed = client.post(f"/api/sessions/{session_id}/interrupt", json={"reason": "Problema no jogo"})
+    assert failed.status_code == 503
+    denied = client.post(f"/api/sessions/{session_id}/close/force", json={"confirmed": False})
+    assert denied.status_code == 422
+    assert client.steam.force_calls == 0
+    forced = client.post(f"/api/sessions/{session_id}/close/force", json={"confirmed": True})
+    assert forced.status_code == 200
+    db_session.refresh(row)
+    assert row.status == "interrupted"
+    assert client.steam.force_calls == 1
+    assert db_session.get(Simulator, row.simulator_id).status == "ready"
+
+
+def test_force_close_endpoint_requires_operator_or_admin(client, db_session):
+    assert client.post("/api/sessions/missing/close/force", json={"confirmed": True}).status_code == 401
+    user = User(username="viewer", password_hash=hash_password("long-enough-password"), role="viewer")
+    db_session.add(user)
+    db_session.commit()
+    client.post("/api/auth/login", json={"username": "viewer", "password": "long-enough-password"})
+    assert client.post("/api/sessions/missing/close/force", json={"confirmed": True}).status_code == 403
+
+
+def test_timer_close_failure_is_not_retried_in_a_loop_or_marked_complete(client, db_session):
+    session_id, row = running_session(client, db_session)
+    row.started_at = datetime.now(timezone.utc) - timedelta(minutes=row.contracted_minutes, seconds=2)
+    db_session.commit()
+    client.steam.leave_running_on_close = True
+    supervisor = SessionSupervisor(client.session_factory, client.steam)
+    supervisor.tick()
+    supervisor.tick()
+    db_session.refresh(row)
+    assert row.status == "running"
+    assert client.steam.close_calls == 1
+    assert client.get("/api/operator/status").json()["shutdown"]["state"] == "CLOSE_FAILED"
+    assert db_session.get(Simulator, row.simulator_id).status == "game_unresponsive"
+
+
+def test_manual_end_and_session_timer_share_one_close_owner(client, db_session):
+    session_id, row = running_session(client, db_session)
+    row.started_at = datetime.now(timezone.utc) - timedelta(minutes=row.contracted_minutes, seconds=1)
+    db_session.commit()
+    original_close = client.steam.close_game
+    def delayed_close(origin="test", retry=False):
+        import time
+        time.sleep(0.1)
+        original_close(origin, retry)
+    client.steam.close_game = delayed_close
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        end_future = pool.submit(client.post, f"/api/sessions/{session_id}/end")
+        timer_future = pool.submit(SessionSupervisor(client.session_factory, client.steam,
+            transition_lock=client.app.state.session_transition_lock).tick)
+        end_result = end_future.result()
+        timer_future.result()
+    db_session.refresh(row)
+    assert row.status == "completed"
+    assert client.steam.close_calls == 1
+    assert end_result.status_code in {200, 409}
+    assert client.steam.force_calls == 0
 
 
 def test_backend_sets_two_minute_and_thirty_second_warning_states(client, db_session):
@@ -456,7 +546,7 @@ def test_kiosk_initial_state_and_orientation_countdown_are_backend_driven(client
     assert waiting["session"] is None
     operator_login(client, db_session)
     response = client.post("/api/sessions", json={
-        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor",
     })
     guidance = client.get("/api/kiosk/status").json()
     assert response.status_code == 201
@@ -488,7 +578,7 @@ def test_kiosk_shows_generic_failure_after_delayed_launch_failure(client, db_ses
     operator_login(client, db_session)
     client.steam.launch_error = "steam launch failed"
     response = client.post("/api/sessions", json={
-        "duration_minutes": 15, "simulator_id": 1, "game_id": 1,
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "monitor",
     })
     SessionSupervisor(client.session_factory, client.steam, guidance_duration_seconds=0).tick()
     failure = client.get("/api/kiosk/status").json()
@@ -496,3 +586,47 @@ def test_kiosk_shows_generic_failure_after_delayed_launch_failure(client, db_ses
     assert failure["screen"] == "failure"
     assert "failure_reason" not in failure["session"]
     assert client.steam.close_calls == 0
+
+
+
+def test_operator_game_catalog_is_server_owned(client, db_session):
+    operator_login(client, db_session)
+    response = client.get("/api/operator/games")
+    assert response.status_code == 200
+    game = response.json()["games"][0]
+    assert game["id"] == 1
+    assert [mode["id"] for mode in game["launch_modes"]] == ["monitor", "oculus", "steamvr"]
+
+
+def test_unknown_launch_mode_is_rejected_without_creating_session(client, db_session):
+    operator_login(client, db_session)
+    response = client.post("/api/sessions", json={
+        "duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": "legacy-vr",
+    })
+    assert response.status_code == 422
+    assert db_session.scalar(select(RacingSession)) is None
+    assert client.steam.launch_calls == 0
+
+
+@pytest.mark.parametrize("mode", ["oculus", "steamvr"])
+def test_vr_session_requires_confirmed_connection_and_tracking(client, db_session, monkeypatch, mode):
+    class Diagnostics:
+        state = "disconnected"
+        def inspect(self, requested_mode):
+            assert requested_mode == mode
+            return {"pcvr": {"state": self.state, "label": "DESCONECTADO" if self.state == "disconnected" else "CONECTADO", "detail": "API simulada"}}
+
+    diagnostics = Diagnostics()
+    monkeypatch.setattr(client.app.state, "vr_diagnostics", diagnostics)
+    operator_login(client, db_session)
+    payload = {"duration_minutes": 15, "simulator_id": 1, "game_id": 1, "launch_mode": mode}
+    denied = client.post("/api/sessions", json=payload)
+    assert denied.status_code == 409
+    assert "DESCONECTADO" in denied.json()["detail"]
+    assert db_session.scalar(select(RacingSession)) is None
+    diagnostics.state = "connected"
+    accepted = client.post("/api/sessions", json=payload)
+    assert accepted.status_code == 201
+    assert accepted.json()["launch_mode"] == mode
+    SessionSupervisor(client.session_factory, client.steam, guidance_duration_seconds=0).tick()
+    assert client.steam.last_launch_mode == mode

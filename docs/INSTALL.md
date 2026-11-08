@@ -178,3 +178,12 @@ O fechamento usa a identificacao existente do executavel ACC e primeiro solicita
 Para validar com o ACC real, inicie a Steam manualmente, execute `Start-RacingManager.ps1`, inicie uma sessao pelo Operator e aguarde o jogo entrar em andamento. Clique em **INTERROMPER SESSAO**, escolha o motivo e confirme. Confira no Gerenciador de Tarefas que `AC2-Win64-Shipping.exe` encerrou e que a Steam continua aberta; no Operator o equipamento deve voltar a disponivel, o Kiosk deve voltar a espera e o overlay deve desaparecer. No Admin, confira operador, motivo, observacao, hora, duracao efetiva e tempo nao utilizado; exporte o CSV com o filtro de motivo. Esses passos sao um teste manual; os testes automatizados usam apenas um adaptador simulado e nao validam o ACC instalado.
 
 Na proxima inicializacao, a migracao aditiva acrescenta horario da interrupcao, operador responsavel, motivo e observacao como campos opcionais, preservando as linhas atuais do SQLite. Registros antigos continuam consultaveis; os campos novos ficam vazios nos registros anteriores.
+
+## Diagnóstico VR
+
+No Operator, selecione VR Oculus ou VR SteamVR e pressione TESTAR VR. Essa sondagem é somente leitura: não cria sessão, não inicia SteamVR ou ACC e não encerra aplicações. UNKNOWN indica que o estado não pôde ser comprovado. O campo headset colocado permanece desconhecido porque esta versão não abre uma sessão no runtime Meta. Consulte [HARDWARE.md](HARDWARE.md) para limitações e procedimento de teste no Quest 3S.
+
+
+## Diagnostico VR
+
+No Operator, selecione VR Oculus ou VR SteamVR e pressione TESTAR VR. A sondagem e somente leitura: nao cria sessao, nao inicia SteamVR ou ACC e nao encerra aplicacoes. `DESCONHECIDO` indica que o estado nao pode ser comprovado. O campo headset colocado permanece desconhecido porque esta versao nao abre sessao no runtime Meta. Consulte [HARDWARE.md](HARDWARE.md) para limitacoes e procedimento de teste no Quest 3S.

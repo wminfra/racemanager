@@ -17,6 +17,7 @@ from app.database.migrations import (migrate_legacy_sessions, migrate_session_op
                                     recover_open_sessions)
 from app.modules.steam.integration import SteamIntegration
 from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
+from app.modules.vr import VRDiagnostics
 from app.services.session_supervisor import SessionSupervisor
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,6 +59,7 @@ app = FastAPI(title="Racing Manager", version="0.1.0", lifespan=lifespan)
 app.state.engine = engine
 app.state.session_factory = SessionLocal
 app.state.steam = SteamIntegration(settings)
+app.state.vr_diagnostics = VRDiagnostics(settings, app.state.steam)
 app.state.session_transition_lock = threading.RLock()
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie=settings.session_cookie,
                    https_only=settings.cookie_secure, same_site="lax", path="/", max_age=8 * 60 * 60)

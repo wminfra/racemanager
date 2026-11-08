@@ -20,6 +20,7 @@ from app.services.history import HISTORY_STATUSES, INTERRUPTION_REASONS, read_hi
 from app.services.sessions import (begin_session, cancel_waiting_session, configured_durations,
                                    end_running_session, interrupt_running_session,
                                    public_kiosk_state, session_view, SessionClosureError)
+from app.modules.vr.diagnostics import VRDiagnostics
 
 router = APIRouter()
 _login_attempts: dict[str, list[float]] = {}
@@ -98,6 +99,17 @@ def operator_status(request: Request, db: Session = Depends(get_db), user: User 
         RacingSession.status == "technical_failure").order_by(RacingSession.ended_at.desc()))
     status["recent_failure"] = session_view(status["recent_failure"]) if status["recent_failure"] else None
     return status
+
+
+@router.get("/operator/vr/diagnostic")
+def operator_vr_diagnostic(request: Request,
+                           mode: str = Query(default="oculus", pattern="^(oculus|steamvr)$"),
+                           user: User = Depends(operator_or_admin)):
+    """Read-only local runtime probe. It never launches VR software or a session."""
+    diagnostics = getattr(request.app.state, "vr_diagnostics", None)
+    if diagnostics is None:
+        diagnostics = VRDiagnostics(settings, request.app.state.steam)
+    return diagnostics.inspect(mode)
 
 
 @router.get("/sessions/durations")

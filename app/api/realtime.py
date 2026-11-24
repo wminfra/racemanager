@@ -35,9 +35,11 @@ async def _send_status(websocket: WebSocket, public: bool = False, user_id: int 
             phase = value["phase"] if value else None
             screen = ("playing" if value and value["status"] == "running" else
                       "guidance" if value and phase in {"guidance", "launching"} else "waiting")
+            nav = getattr(websocket.app.state, "navigation_service", None)
+            nav_status = nav.get_status() if nav else None
             await websocket.send_json({"type": "session_status", "running_session": value,
                                        "simulator_status": "game_running" if screen == "playing" else "starting" if screen == "guidance" else "waiting",
-                                       "screen": screen})
+                                       "screen": screen, "navigation": nav_status})
         await asyncio.sleep(1)
 
 

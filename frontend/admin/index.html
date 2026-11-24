@@ -50,6 +50,119 @@
         </article>
       </div>
 
+      <section class="card nav-admin-card" style="margin:24px 0">
+        <div class="row spread">
+          <div>
+            <div class="eyebrow">CONFIGURAÇÕES DE CONTROLES</div>
+            <h2>Gerenciador de Botões de Navegação (Navigation Button Manager)</h2>
+          </div>
+          <span id="nav-admin-badge" class="status off">VERIFICANDO</span>
+        </div>
+        <p class="muted">Configure botões dedicados do volante/joystick para navegação nos menus do simulador sem necessidade de teclado físico.</p>
+
+        <form id="nav-config-form" class="form" style="max-width:none">
+          <div class="grid admin-grid" style="margin:16px 0">
+            <article class="card" style="padding:16px">
+              <div class="row spread">
+                <label class="eyebrow" for="nav-device-select">DISPOSITIVO JOYSTICK (USB)</label>
+                <button id="nav-refresh-devs" type="button" class="btn secondary" style="min-height:36px;padding:6px 14px;font-size:12px">Atualizar lista</button>
+              </div>
+              <select id="nav-device-select" class="input" style="margin-top:8px" required>
+                <option value="">Carregando dispositivos...</option>
+              </select>
+              <div id="nav-device-details" class="status-row" style="margin-top:10px">
+                <span>Hardware ID:</span><b id="nav-device-hwid">—</b>
+              </div>
+              <div style="margin-top:14px">
+                <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+                  <input type="checkbox" id="nav-enabled-check" style="width:18px;height:18px;accent-color:var(--red)" checked>
+                  <span>Habilitar navegação por botões físicos</span>
+                </label>
+              </div>
+            </article>
+
+            <article class="card" style="padding:16px">
+              <div class="eyebrow">PARÂMETROS DE CONTROLE</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">
+                <label style="font-size:12px;color:var(--muted)">
+                  Debounce (ms):
+                  <input type="number" id="nav-debounce-input" class="input" min="50" max="1000" step="10" value="200" required>
+                </label>
+                <label style="font-size:12px;color:var(--muted)">
+                  Delay repetição setas (ms):
+                  <input type="number" id="nav-repeat-delay-input" class="input" min="100" max="2000" step="50" value="400" required>
+                </label>
+              </div>
+              <div style="margin-top:10px">
+                <label style="font-size:12px;color:var(--muted)">
+                  Intervalo repetição setas (ms):
+                  <input type="number" id="nav-repeat-interval-input" class="input" min="50" max="500" step="10" value="150" required>
+                </label>
+              </div>
+              <p class="muted" style="font-size:11px;margin-top:8px">* ENTER, ESC e SPACE não se repetem ao segurar, prevenindo duplo acionamento acidental.</p>
+            </article>
+          </div>
+
+          <div class="card" style="padding:18px;margin:16px 0">
+            <div class="row spread">
+              <div>
+                <div class="eyebrow">MAPEAMENTO DE BOTÕES DEDICADOS</div>
+                <h3 style="margin:4px 0 0">Ações e Botões Físicos</h3>
+              </div>
+              <span id="nav-detect-indicator" class="status off hidden">AGUARDANDO PRESSIONAMENTO...</span>
+            </div>
+            <div class="table-wrap" style="margin-top:14px">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:20%">Ação</th>
+                    <th style="width:24%">Comando Enviado</th>
+                    <th style="width:20%">Botão Configurado</th>
+                    <th style="width:36%">Configurar Botão</th>
+                  </tr>
+                </thead>
+                <tbody id="nav-mappings-admin-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="row" style="gap:12px;margin-top:16px">
+            <button id="nav-save-btn" type="submit" class="btn">Salvar configurações de navegação</button>
+            <button id="nav-restore-btn" type="button" class="btn secondary">Restaurar padrões</button>
+          </div>
+          <div id="nav-admin-notice" class="notice" style="margin-top:8px"></div>
+        </form>
+
+        <div class="card" style="padding:18px;margin-top:24px">
+          <div class="row spread">
+            <div>
+              <div class="eyebrow">MONITORAMENTO E DIAGNÓSTICO</div>
+              <h3 style="margin:4px 0 0">Teste de Botões em Tempo Real</h3>
+            </div>
+            <span id="nav-test-badge" class="status">TESTE ATIVO</span>
+          </div>
+          <p class="muted" style="font-size:13px;margin:8px 0 14px">Pressione qualquer botão no volante ou clique nos comandos abaixo para testar o envio de teclas ao sistema operacional.</p>
+
+          <div class="status-list" style="margin-bottom:16px">
+            <div class="status-row"><span>Último Botão Físico:</span><b id="nav-test-last-btn">—</b></div>
+            <div class="status-row"><span>Ação Mapeada:</span><b id="nav-test-last-act">—</b></div>
+            <div class="status-row"><span>Status do Envio:</span><b id="nav-test-last-status">—</b></div>
+          </div>
+
+          <div class="eyebrow" style="margin-bottom:8px">TESTAR DISPARO DE TECLAS (SIMULAÇÃO):</div>
+          <div class="row" style="gap:8px">
+            <button type="button" class="btn secondary nav-test-cmd-btn" data-action="UP" style="min-height:38px;padding:6px 12px;font-size:12px">▲ UP</button>
+            <button type="button" class="btn secondary nav-test-cmd-btn" data-action="DOWN" style="min-height:38px;padding:6px 12px;font-size:12px">▼ DOWN</button>
+            <button type="button" class="btn secondary nav-test-cmd-btn" data-action="LEFT" style="min-height:38px;padding:6px 12px;font-size:12px">◄ LEFT</button>
+            <button type="button" class="btn secondary nav-test-cmd-btn" data-action="RIGHT" style="min-height:38px;padding:6px 12px;font-size:12px">► RIGHT</button>
+            <button type="button" class="btn secondary nav-test-cmd-btn" data-action="ENTER" style="min-height:38px;padding:6px 12px;font-size:12px">↵ ENTER</button>
+            <button type="button" class="btn secondary nav-test-cmd-btn" data-action="ESC" style="min-height:38px;padding:6px 12px;font-size:12px">⎋ ESC</button>
+            <button type="button" class="btn secondary nav-test-cmd-btn" data-action="SPACE" style="min-height:38px;padding:6px 12px;font-size:12px">␣ SPACE</button>
+          </div>
+          <div id="nav-test-notice" class="notice" style="margin-top:6px;font-size:12px"></div>
+        </div>
+      </section>
+
       <article class="card">
         <h2>Estado das sessões</h2><div id="statuses" class="status-list"></div>
       </article>
@@ -137,8 +250,261 @@
         for(const [key,label] of Object.entries(names)){const row=document.createElement('div');row.className='status-row';const title=document.createElement('span');title.textContent=label;const value=document.createElement('b');value.textContent=summary.by_status[key];row.append(title,value);list.append(row)}
         const durations=await api('/admin/session-durations');document.querySelector('[name=durations]').value=durations.durations.join(', ');
         await loadHistory();
+        await loadNavDevices();
+        await loadNavConfig();
+        if(!testPollingInterval) testPollingInterval = setInterval(pollTestEvents, 1000);
       }catch(e){document.querySelector('#admin-notice').textContent='Não foi possível carregar a configuração: '+e.message}
     }
+
+    const NAV_ACTIONS = [
+      { id: 'UP', label: 'Navegar para cima', cmd: 'Seta para cima' },
+      { id: 'DOWN', label: 'Navegar para baixo', cmd: 'Seta para baixo' },
+      { id: 'LEFT', label: 'Navegar para esquerda', cmd: 'Seta para esquerda' },
+      { id: 'RIGHT', label: 'Navegar para direita', cmd: 'Seta para direita' },
+      { id: 'ENTER', label: 'Confirmar / Selecionar', cmd: 'Enter' },
+      { id: 'ESC', label: 'Voltar / Cancelar', cmd: 'Escape' },
+      { id: 'SPACE', label: 'Espaço / Alternar', cmd: 'Espaço' }
+    ];
+    let navDevicesList = [];
+    let navMappingsState = {};
+    let isDetecting = false;
+
+    async function loadNavDevices(){
+      const select = document.querySelector('#nav-device-select');
+      try{
+        navDevicesList = await api('/admin/navigation/devices');
+        select.replaceChildren();
+        if(!navDevicesList.length){
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'Nenhum dispositivo joystick detectado no Windows';
+          select.append(opt);
+          document.querySelector('#nav-device-hwid').textContent = 'Nenhum dispositivo';
+          return;
+        }
+        for(const dev of navDevicesList){
+          const opt = document.createElement('option');
+          opt.value = dev.hardware_id;
+          opt.dataset.index = dev.index;
+          opt.dataset.name = dev.name;
+          opt.textContent = `${dev.name} (${dev.hardware_id}) - ${dev.num_buttons} botões [${dev.connected ? 'Conectado' : 'Desconectado'}]`;
+          select.append(opt);
+        }
+        updateDeviceDetails();
+      }catch(err){
+        document.querySelector('#nav-admin-notice').textContent = 'Erro ao listar dispositivos: ' + err.message;
+      }
+    }
+
+    function updateDeviceDetails(){
+      const select = document.querySelector('#nav-device-select');
+      const opt = select.selectedOptions[0];
+      if(opt && opt.value){
+        document.querySelector('#nav-device-hwid').textContent = opt.value;
+      } else {
+        document.querySelector('#nav-device-hwid').textContent = '—';
+      }
+    }
+    document.querySelector('#nav-device-select').addEventListener('change', updateDeviceDetails);
+    document.querySelector('#nav-refresh-devs').addEventListener('click', async()=>{
+      await loadNavDevices();
+      document.querySelector('#nav-admin-notice').textContent = 'Lista de dispositivos atualizada.';
+    });
+
+    async function loadNavConfig(){
+      try{
+        const cfg = await api('/admin/navigation/config');
+        document.querySelector('#nav-enabled-check').checked = !!cfg.enabled;
+        document.querySelector('#nav-debounce-input').value = cfg.debounce_ms || 200;
+        document.querySelector('#nav-repeat-delay-input').value = cfg.repeat_delay_ms || 400;
+        document.querySelector('#nav-repeat-interval-input').value = cfg.repeat_interval_ms || 150;
+
+        if(cfg.device_identifier){
+          const select = document.querySelector('#nav-device-select');
+          let matched = false;
+          for(const opt of select.options){
+            if(opt.value.toLowerCase() === cfg.device_identifier.toLowerCase()){
+              opt.selected = true;
+              matched = true;
+              break;
+            }
+          }
+          if(!matched && cfg.device_identifier){
+            const opt = document.createElement('option');
+            opt.value = cfg.device_identifier;
+            opt.textContent = `${cfg.device_name || 'Dispositivo salvo'} (${cfg.device_identifier}) [Desconectado]`;
+            opt.selected = true;
+            select.append(opt);
+          }
+          updateDeviceDetails();
+        }
+
+        navMappingsState = Object.assign({}, cfg.mappings || {});
+        renderNavMappingsAdminTable();
+        updateNavBadge();
+      }catch(err){
+        document.querySelector('#nav-admin-notice').textContent = 'Erro ao carregar configuração: ' + err.message;
+      }
+    }
+
+    function updateNavBadge(){
+      const badge = document.querySelector('#nav-admin-badge');
+      const select = document.querySelector('#nav-device-select');
+      const enabled = document.querySelector('#nav-enabled-check').checked;
+      if(!enabled){
+        badge.textContent = 'DESABILITADO';
+        badge.className = 'status off';
+      } else if(!select.value){
+        badge.textContent = 'SEM DISPOSITIVO';
+        badge.className = 'status off';
+      } else {
+        badge.textContent = 'SISTEMA DISPONÍVEL';
+        badge.className = 'status';
+      }
+    }
+    document.querySelector('#nav-enabled-check').addEventListener('change', updateNavBadge);
+
+    function renderNavMappingsAdminTable(){
+      const tbody = document.querySelector('#nav-mappings-admin-tbody');
+      tbody.replaceChildren();
+
+      for(const act of NAV_ACTIONS){
+        const tr = document.createElement('tr');
+
+        const tdAct = document.createElement('td');
+        tdAct.innerHTML = `<b>${act.id}</b><div class="muted" style="font-size:11px">${act.label}</div>`;
+
+        const tdCmd = document.createElement('td');
+        tdCmd.innerHTML = `<code>${act.cmd}</code>`;
+
+        const tdBtn = document.createElement('td');
+        const currentBtn = navMappingsState[act.id];
+        tdBtn.id = `nav-btn-val-${act.id}`;
+        if(currentBtn){
+          tdBtn.innerHTML = `<span style="font-weight:700;color:var(--text);background:#1a2734;padding:4px 8px;border-radius:6px">Botão ${currentBtn}</span>`;
+        } else {
+          tdBtn.innerHTML = `<span class="muted" style="font-style:italic">Não configurado</span>`;
+        }
+
+        const tdActions = document.createElement('td');
+        const btnDetect = document.createElement('button');
+        btnDetect.type = 'button';
+        btnDetect.className = 'btn secondary';
+        btnDetect.style.cssText = 'min-height:34px;padding:4px 10px;font-size:12px;margin-right:6px';
+        btnDetect.textContent = 'Detectar Botão';
+        btnDetect.onclick = () => triggerButtonDetection(act.id);
+
+        const btnClear = document.createElement('button');
+        btnClear.type = 'button';
+        btnClear.className = 'btn secondary';
+        btnClear.style.cssText = 'min-height:34px;padding:4px 10px;font-size:12px';
+        btnClear.textContent = 'Limpar';
+        btnClear.onclick = () => {
+          navMappingsState[act.id] = null;
+          renderNavMappingsAdminTable();
+        };
+
+        tdActions.append(btnDetect, btnClear);
+        tr.append(tdAct, tdCmd, tdBtn, tdActions);
+        tbody.append(tr);
+      }
+    }
+
+    async function triggerButtonDetection(actionId){
+      if(isDetecting) return;
+      isDetecting = true;
+      const indicator = document.querySelector('#nav-detect-indicator');
+      const notice = document.querySelector('#nav-admin-notice');
+      indicator.textContent = `PRESSIONE O BOTÃO NO VOLANTE PARA: ${actionId}...`;
+      indicator.classList.remove('hidden');
+      notice.textContent = `Aguardando acionamento físico para ${actionId}. Pressione o botão desejado no volante/joystick...`;
+
+      try{
+        const res = await api(`/admin/navigation/detect-button?action=${encodeURIComponent(actionId)}&timeout=10`);
+        if(res.status === 'detected' && res.detected_button){
+          navMappingsState[actionId] = res.detected_button;
+          notice.textContent = `Sucesso! Botão ${res.detected_button} associado à ação ${actionId}. Clique em "Salvar configurações" para confirmar.`;
+          renderNavMappingsAdminTable();
+        } else {
+          notice.textContent = 'Tempo limite (10s) encerrado sem detecção de botão físico.';
+        }
+      }catch(err){
+        notice.textContent = 'Erro durante detecção: ' + err.message;
+      }finally{
+        isDetecting = false;
+        indicator.classList.add('hidden');
+      }
+    }
+
+    document.querySelector('#nav-config-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const notice = document.querySelector('#nav-admin-notice');
+      notice.textContent = '';
+      const select = document.querySelector('#nav-device-select');
+      const selectedOpt = select.selectedOptions[0];
+      const selectedDev = navDevicesList.find(d => d.hardware_id === select.value) || {};
+
+      const payload = {
+        enabled: document.querySelector('#nav-enabled-check').checked,
+        device_identifier: select.value || null,
+        device_name: selectedDev.name || selectedOpt?.dataset.name || null,
+        device_index: selectedDev.index !== undefined ? selectedDev.index : (selectedOpt ? Number(selectedOpt.dataset.index) : null),
+        mappings: navMappingsState,
+        debounce_ms: Number(document.querySelector('#nav-debounce-input').value),
+        repeat_delay_ms: Number(document.querySelector('#nav-repeat-delay-input').value),
+        repeat_interval_ms: Number(document.querySelector('#nav-repeat-interval-input').value)
+      };
+
+      try{
+        await api('/admin/navigation/config', { method: 'PUT', body: JSON.stringify(payload) });
+        notice.textContent = 'Configurações de botões de navegação salvas com sucesso!';
+        updateNavBadge();
+      }catch(err){
+        notice.textContent = 'Erro ao salvar: ' + err.message;
+      }
+    });
+
+    document.querySelector('#nav-restore-btn').addEventListener('click', async () => {
+      const notice = document.querySelector('#nav-admin-notice');
+      if(!confirm('Deseja realmente restaurar os mapeamentos e parâmetros de navegação para o padrão?')) return;
+      try{
+        await api('/admin/navigation/defaults', { method: 'POST' });
+        notice.textContent = 'Configurações de navegação restauradas para o padrão.';
+        await loadNavConfig();
+      }catch(err){
+        notice.textContent = 'Erro ao restaurar padrões: ' + err.message;
+      }
+    });
+
+    async function pollTestEvents(){
+      try{
+        const data = await api('/admin/navigation/test-events');
+        const last = data.last_event;
+        if(last){
+          document.querySelector('#nav-test-last-btn').textContent = last.button ? `Botão ${last.button}` : 'Simulação Manual';
+          document.querySelector('#nav-test-last-act').textContent = last.action ? `${last.action} (${last.command})` : 'Não configurado';
+          document.querySelector('#nav-test-last-status').textContent = last.status || 'OK';
+          document.querySelector('#nav-test-last-status').style.color = (last.status || '').includes('enviado') ? 'var(--green)' : 'var(--muted)';
+        }
+      }catch(e){}
+    }
+
+    document.querySelectorAll('.nav-test-cmd-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const action = btn.dataset.action;
+        const notice = document.querySelector('#nav-test-notice');
+        notice.textContent = `Enviando comando de teste: ${action}...`;
+        try{
+          const res = await api('/admin/navigation/test-command', { method: 'POST', body: JSON.stringify({ action }) });
+          notice.textContent = `Tecla disparada com sucesso: ${res.action} (${res.command})!`;
+          notice.style.color = 'var(--green)';
+          await pollTestEvents();
+        }catch(err){
+          notice.textContent = `Falha ao testar ${action}: ` + err.message;
+          notice.style.color = 'var(--red)';
+        }
+      });
+    });
 
     document.querySelector('#create-user').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const values=new FormData(form);try{await api('/admin/users',{method:'POST',body:JSON.stringify({username:values.get('username'),password:values.get('password'),role:'operator'})});document.querySelector('#admin-notice').textContent='Operador criado.';form.reset()}catch(error){document.querySelector('#admin-notice').textContent=error.message}});
     document.querySelector('#durations').addEventListener('submit',async event=>{event.preventDefault();try{const values=document.querySelector('[name="durations"]').value.split(',').map(value=>Number(value.trim()));const result=await api('/admin/session-durations',{method:'PUT',body:JSON.stringify({durations:values})});document.querySelector('[name="durations"]').value=result.durations.join(', ');document.querySelector('#duration-notice').textContent='Durações atualizadas.'}catch(error){document.querySelector('#duration-notice').textContent=error.message}});

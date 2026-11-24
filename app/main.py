@@ -14,10 +14,11 @@ from app.core.config import settings
 from app.database.session import Base, SessionLocal, engine
 from app.models import AppSetting, Game, Simulator
 from app.database.migrations import (migrate_legacy_sessions, migrate_session_operational_columns,
-                                    recover_open_sessions)
+                                    recover_open_sessions, init_navigation_config)
 from app.modules.steam.integration import SteamIntegration
 from app.modules.steam.game import ASSETTO_CORSA_COMPETIZIONE
 from app.modules.vr import VRDiagnostics
+from app.modules.navigation import NavigationService
 from app.services.session_supervisor import SessionSupervisor
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +39,9 @@ async def lifespan(app: FastAPI):
         migrate_session_operational_columns(db)
         migrate_legacy_sessions(db)
         recover_open_sessions(db, app.state.steam)
+        init_navigation_config(db)
+    app.state.navigation_service.load_config()
+    app.state.navigation_service.start()
     supervisor = SessionSupervisor(app.state.session_factory, app.state.steam,
         guidance_duration_seconds=settings.guidance_duration_seconds,
         unresponsive_grace_seconds=60,
@@ -45,6 +49,7 @@ async def lifespan(app: FastAPI):
     app.state.supervisor = supervisor
     app.state.supervisor_task = asyncio.create_task(supervisor.run())
     yield
+    app.state.navigation_service.stop()
     app.state.supervisor_task.cancel()
     try:
         await app.state.supervisor_task
@@ -60,6 +65,7 @@ app.state.engine = engine
 app.state.session_factory = SessionLocal
 app.state.steam = SteamIntegration(settings)
 app.state.vr_diagnostics = VRDiagnostics(settings, app.state.steam)
+app.state.navigation_service = NavigationService(app.state.session_factory)
 app.state.session_transition_lock = threading.RLock()
 app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, session_cookie=settings.session_cookie,
                    https_only=settings.cookie_secure, same_site="lax", path="/", max_age=8 * 60 * 60)

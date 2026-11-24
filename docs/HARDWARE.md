@@ -4,9 +4,20 @@
 
 - ODESC 4.2 como controlador do volante artesanal baseado em motor de hoverboard.
 - Arduino Leonardo USB HID para pedais e botões de troca de marcha.
+- Arduino Pro Micro / Leonardo operando como Joystick USB HID para controles de volante e navegação.
 - Futuro headset Meta Quest 3S.
 
-O Racing Manager não conversa com a ODESC nem com o Arduino nesta etapa e não envia comandos de torque, movimento ou calibração. Não se presume que os dispositivos aparecem como HID utilizável: isso deve ser verificado no Gerenciador de Dispositivos e por uma ferramenta de inspeção antes de selecionar uma biblioteca ou associar eixos/botões.
+O Racing Manager não conversa com a ODESC nem envia comandos de torque, movimento ou calibração. A integração com controles de navegação ocorre pelo módulo `app/modules/navigation/` de forma somente-leitura e não exclusiva via Windows Multimedia API (`winmm.dll`), preservando o funcionamento nativo do joystick e dos demais periféricos no simulador.
+
+## Navigation Button Manager (Controle de Navegação por Botões Físicos)
+
+O módulo `app/modules/navigation/` atua como ponte de controle para navegação de menus sem teclado físico:
+- **Leitura não exclusiva**: Lê o joystick selecionado sem criar bloqueios (shared read via WinMM), permitindo que Assetto Corsa Competizione e outros simuladores leiam o mesmo dispositivo simultaneamente sem conflito.
+- **Botões Dedicados**: Botões associados a ações (`UP`, `DOWN`, `LEFT`, `RIGHT`, `ENTER`, `ESC`, `SPACE`) disparam teclas virtuais do Windows (`SendInput`) diretamente para a janela em foco.
+- **Sem alternância de modo**: Opera de maneira simples e desacoplada do estado interno do jogo (sem Menu Mode / Race Mode).
+- **Proteção contra repetição involuntária**: Bloqueia repetição ao segurar para `ENTER`, `ESC` e `SPACE`, e permite repetição controlada e configurável apenas para as setas direcionais.
+- **Detecção e Reconexão**: Monitora o estado de conexão do dispositivo e recupera o fluxo automaticamente caso o cabo USB seja reconectado.
+- **Administração e Operação**: Painel administrativo com captura ao vivo de botões ("Detectar Botão") e teste de comandos; painel do operador com visualização de status e mapeamentos ativos.
 
 ## Caminho de integração
 

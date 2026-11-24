@@ -130,3 +130,36 @@ def recover_open_sessions(db: Session, steam) -> int:
                         details=f"session={session.public_id} state={session.status}"))
     db.commit()
     return len(active)
+
+
+def init_navigation_config(db: Session) -> bool:
+    """Ensure navigation controls setting exists in app_settings table idempotently."""
+    import json
+    from app.models import AppSetting
+    from app.modules.navigation.mapping import NavigationConfig
+    from app.modules.navigation.device_manager import DeviceManager
+
+    setting = db.get(AppSetting, "navigation_controls_config")
+    if setting is not None and setting.value:
+        return False
+
+    cfg = NavigationConfig.default()
+    try:
+        dm = DeviceManager()
+        devices = dm.list_devices()
+        for dev in devices:
+            if "arduino" in dev.name.lower() or dev.hardware_id.upper() in {"VID_2341&PID_8037", "VID_2341&PID_8036"}:
+                cfg.device_identifier = dev.hardware_id
+                cfg.device_name = dev.name
+                cfg.device_index = dev.index
+                break
+    except Exception:
+        pass
+
+    if setting is None:
+        db.add(AppSetting(key="navigation_controls_config", value=json.dumps(cfg.to_dict())))
+    else:
+        setting.value = json.dumps(cfg.to_dict())
+    db.commit()
+    return True
+

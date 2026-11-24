@@ -100,8 +100,8 @@ def test_unregistered_game_is_rejected_before_start(client, db_session, caplog, 
 
     assert response.status_code == 422
     assert response.json()["detail"].startswith("O jogo") and response.json()["detail"].endswith("configurados.")
-    assert "Motivo da rejei??o: jogo ID 1" in caplog.text
-    assert "[SESSION] Verificando integra??o Steam." not in caplog.text
+    assert "Motivo da rejeição: jogo ID 1" in caplog.text
+    assert "[SESSION] Verificando integração Steam." not in caplog.text
 
 
 def test_two_simultaneous_sessions_are_prevented(client, db_session):
@@ -431,7 +431,7 @@ def test_unresponsive_game_is_a_technical_failure(client, db_session):
     SessionSupervisor(client.session_factory, client.steam).tick()
     db_session.refresh(row)
     assert row.status == "technical_failure"
-    assert "responder" in row.failure_reason
+    assert "não respondendo" in row.failure_reason
 
 
 def test_unresponsive_game_gets_startup_grace_period(client, db_session):

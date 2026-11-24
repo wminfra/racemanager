@@ -1,3 +1,4 @@
+import asyncio
 import time
 import csv
 import io
@@ -14,6 +15,10 @@ from app.database.session import get_db
 from app.models import AppSetting, AuditLog, Game, RacingSession, Simulator, User
 from app.schemas.auth import LoginRequest, UserCreate
 from app.schemas.session import ForceCloseConfirm, SessionCreate, SessionDurationsUpdate, SessionInterrupt
+from app.schemas.navigation import (ButtonDetectResponse, NavigationConfigIn, NavigationConfigOut,
+                                   NavigationDeviceOut, NavigationStatusOut, TestCommandRequest, TestCommandResponse)
+from app.modules.navigation.mapping import NavigationConfig
+from app.modules.navigation.constants import ACTIONS, ALLOWED_ACTIONS
 from app.services.audit import record
 from app.services.auth import hash_password, verify_password
 from app.services.history import HISTORY_STATUSES, INTERRUPTION_REASONS, read_history
@@ -350,3 +355,104 @@ def update_session_durations(payload: SessionDurationsUpdate,
 def audit_log(db: Session = Depends(get_db), admin: User = Depends(admin_user)):
     return [{"action": item.action, "details": item.details, "created_at": item.created_at.isoformat()}
             for item in db.scalars(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(100))]
+
+
+@router.get("/operator/navigation/status", response_model=NavigationStatusOut)
+def operator_navigation_status(request: Request, user: User = Depends(operator_or_admin)):
+    nav = getattr(request.app.state, "navigation_service", None)
+    if not nav:
+        raise HTTPException(503, "Serviço de botões de navegação não inicializado.")
+    return nav.get_status()
+
+
+@router.get("/admin/navigation/devices", response_model=list[NavigationDeviceOut])
+def admin_navigation_devices(request: Request, admin: User = Depends(admin_user)):
+    nav = getattr(request.app.state, "navigation_service", None)
+    if not nav:
+        raise HTTPException(503, "Serviço de botões de navegação não inicializado.")
+    devices = nav.device_manager.list_devices()
+    return [dev.as_dict() for dev in devices]
+
+
+@router.get("/admin/navigation/config", response_model=NavigationConfigOut)
+def admin_navigation_config(request: Request, admin: User = Depends(admin_user)):
+    nav = getattr(request.app.state, "navigation_service", None)
+    if not nav:
+        raise HTTPException(503, "Serviço de botões de navegação não inicializado.")
+    return nav.config.to_dict()
+
+
+@router.put("/admin/navigation/config", response_model=NavigationConfigOut)
+def update_admin_navigation_config(payload: NavigationConfigIn, request: Request, admin: User = Depends(admin_user)):
+    nav = getattr(request.app.state, "navigation_service", None)
+    if not nav:
+        raise HTTPException(503, "Serviço de botões de navegação não inicializado.")
+    try:
+        new_cfg = NavigationConfig(
+            enabled=payload.enabled,
+            device_identifier=payload.device_identifier,
+            device_name=payload.device_name,
+            device_index=payload.device_index,
+            mappings=payload.mappings,
+            debounce_ms=payload.debounce_ms,
+            repeat_delay_ms=payload.repeat_delay_ms,
+            repeat_interval_ms=payload.repeat_interval_ms,
+        )
+        saved = nav.save_config(new_cfg, actor_id=admin.id)
+        return saved.to_dict()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/admin/navigation/defaults", response_model=NavigationConfigOut)
+def admin_navigation_restore_defaults(request: Request, admin: User = Depends(admin_user)):
+    nav = getattr(request.app.state, "navigation_service", None)
+    if not nav:
+        raise HTTPException(503, "Serviço de botões de navegação não inicializado.")
+    saved = nav.restore_defaults(actor_id=admin.id)
+    return saved.to_dict()
+
+
+@router.get("/admin/navigation/detect-button", response_model=ButtonDetectResponse)
+async def admin_navigation_detect_button(
+    request: Request,
+    action: str | None = None,
+    timeout: float = Query(default=10.0, ge=1.0, le=30.0),
+    admin: User = Depends(admin_user),
+):
+    nav = getattr(request.app.state, "navigation_service", None)
+    if not nav:
+        raise HTTPException(503, "Serviço de botões de navegação não inicializado.")
+    if action and action not in ACTIONS:
+        raise HTTPException(422, f"Ação inválida: {action}")
+    btn = await asyncio.to_thread(nav.detect_button, action, timeout)
+    status = "detected" if btn is not None else "timeout"
+    return {"detected_button": btn, "status": status, "action": action}
+
+
+@router.post("/admin/navigation/cancel-detection")
+def admin_navigation_cancel_detection(request: Request, admin: User = Depends(admin_user)):
+    nav = getattr(request.app.state, "navigation_service", None)
+    if nav:
+        nav.cancel_detection()
+    return {"cancelled": True}
+
+
+@router.get("/admin/navigation/test-events")
+def admin_navigation_test_events(request: Request, admin: User = Depends(admin_user)):
+    nav = getattr(request.app.state, "navigation_service", None)
+    if not nav:
+        raise HTTPException(503, "Serviço de botões de navegação não inicializado.")
+    status = nav.get_status()
+    return {"last_event": status["last_event"], "recent_events": status["recent_events"]}
+
+
+@router.post("/admin/navigation/test-command", response_model=TestCommandResponse)
+def admin_navigation_test_command(payload: TestCommandRequest, request: Request, admin: User = Depends(admin_user)):
+    nav = getattr(request.app.state, "navigation_service", None)
+    if not nav:
+        raise HTTPException(503, "Serviço de botões de navegação não inicializado.")
+    if payload.action not in ACTIONS:
+        raise HTTPException(422, f"Ação inválida: {payload.action}. Permitidas: {ALLOWED_ACTIONS}")
+    return nav.test_command(payload.action)
+
